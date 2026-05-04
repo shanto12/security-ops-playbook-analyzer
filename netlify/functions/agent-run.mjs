@@ -724,28 +724,29 @@ data: ${JSON.stringify(data)}
         send("node_start", { node: "incident_generator", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}. i must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet(one line). a={actionName,target,toolArguments,riskJustification}. Keep text short.`;
         let orchestratedRun;
-        try {
-          orchestratedRun = await callGlmJson({
-            node: "Supervisor Graph Orchestrator",
-            prompt: orchestrationPrompt,
-            temperature: 0.9,
-            maxTokens: 420,
-            send,
-            streamDeltas: false,
-            modelName: envValue("GLM_TOOL_MODEL") || "glm-5-turbo"
-          });
-        } catch (error) {
-          if (!fireworksKey()) throw error;
-          const message = error instanceof Error ? error.message : "Z.ai orchestration failed";
-          timeline("Z.ai fallback", `Falling back to Fireworks only because Z.ai failed: ${message}`, "warning", send);
-          orchestratedRun = await callFireworksJson({
-            node: "Supervisor Graph Orchestrator",
-            prompt: orchestrationPrompt,
-            temperature: 0.82,
-            maxTokens: 420,
-            send
-          });
+        if (fireworksKey()) {
+          try {
+            orchestratedRun = await callFireworksJson({
+              node: "Supervisor Graph Orchestrator",
+              prompt: orchestrationPrompt,
+              temperature: 0.82,
+              maxTokens: 420,
+              send
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Fireworks orchestration failed";
+            timeline("Fireworks fallback", `Falling back to Z.ai GLM only because Fireworks failed: ${message}`, "warning", send);
+          }
         }
+        orchestratedRun ??= await callGlmJson({
+          node: "Supervisor Graph Orchestrator",
+          prompt: orchestrationPrompt,
+          temperature: 0.9,
+          maxTokens: 420,
+          send,
+          streamDeltas: false,
+          modelName: envValue("GLM_TOOL_MODEL") || "glm-5-turbo"
+        });
         const streamPreview = JSON.stringify(orchestratedRun.result);
         for (let index = 0; index < streamPreview.length; index += 96) {
           send("delta", {
