@@ -11,8 +11,18 @@ type LlmLog = {
   type: string
   status: string
   requestPayload?: Record<string, unknown>
-  responsePayload?: unknown
+  responsePayload?: Record<string, unknown>
   tokenCount?: number
+}
+
+type ReportEvent = {
+  mitreMapping?: string[]
+  timeline?: string[]
+  agentRouting?: string[]
+  containmentActions?: string[]
+  recommendations?: string[]
+  analystDecisions?: string[]
+  toolResultSummary?: string[]
 }
 
 const providerResponse = (content: unknown, totalTokens = 321) =>
@@ -198,6 +208,16 @@ function expectFullLlmEvidence(log: LlmLog) {
   expect.soft(containsPromptOrMessages(log.requestPayload)).toBe(true)
 }
 
+function expectCompleteReport(report: ReportEvent | undefined) {
+  expect.soft(report?.mitreMapping?.length).toBeGreaterThanOrEqual(2)
+  expect.soft(report?.timeline?.length).toBeGreaterThanOrEqual(4)
+  expect.soft(report?.agentRouting?.some((item) => /backtrack|supervisor/i.test(item))).toBe(true)
+  expect.soft(report?.containmentActions?.length).toBeGreaterThanOrEqual(2)
+  expect.soft(report?.recommendations?.length).toBeGreaterThanOrEqual(4)
+  expect.soft(report?.analystDecisions?.some((item) => /approve.*isolate_host/i.test(item))).toBe(true)
+  expect.soft(report?.toolResultSummary?.length).toBeGreaterThanOrEqual(2)
+}
+
 async function collectSse(response: Response) {
   const events: SseEvent[] = []
   await consumeSse(response, (event) => events.push(event))
@@ -339,10 +359,97 @@ describe('LLM API log evidence', () => {
 
     expect.soft(llmLogs).toHaveLength(1)
     expect.soft(events.some((event) => event.event === 'report')).toBe(true)
-    const report = events.find((event) => event.event === 'report')?.data as { agentRouting?: string[] } | undefined
-    expect.soft(report?.agentRouting?.some((item) => /backtrack|Supervisor/i.test(item))).toBe(true)
+    const report = events.find((event) => event.event === 'report')?.data as ReportEvent | undefined
+    expectCompleteReport(report)
     expect.soft(events.at(-1)?.event).toBe('done')
     expectFullLlmEvidence(llmLogs[0])
+  })
+
+  it('repairs sparse report arrays from run evidence while preserving raw LLM audit output', async () => {
+    vi.stubEnv('GLM_API_KEY', 'test-key')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        providerResponse(
+          {
+            executiveSummary: 'Sparse provider report.',
+            rootCause: 'Sparse provider root cause.',
+            mitreMapping: [],
+            timeline: [],
+            agentRouting: [],
+            containmentActions: [],
+            recommendations: [],
+            analystDecisions: [],
+            toolResultSummary: [],
+          },
+          345,
+        ),
+      ),
+    )
+
+    const response = await resumeRun(
+      new Request('https://example.test/api/resume-run', {
+        method: 'POST',
+        body: JSON.stringify({
+          decision: 'approve',
+          approval: {
+            runId: 'run-test',
+            actionName: 'isolate_host',
+            target: 'WS-TEST-001',
+            toolArguments: { host: 'WS-TEST-001' },
+            riskJustification: 'Test approval.',
+            severity: 'High',
+            incident: runPlan.i,
+          },
+          routes: runPlan.routingPlan,
+          timeline: [
+            { title: 'Run started', detail: 'Supervisor accepted test incident.', outcome: 'success' },
+            { title: 'Parallel superstep started', detail: 'Tool fanout started.', outcome: 'success' },
+            { title: 'Containment paused', detail: 'HITL card shown.', outcome: 'warning' },
+            { title: 'Command(resume=...) received', detail: 'Analyst decision: approve', outcome: 'success' },
+          ],
+          apiLogs: [
+            {
+              type: 'tool',
+              toolName: 'VirusTotal',
+              callerAgent: 'Enrichment Agent',
+              endpointUrl: '/api/virustotal/lookup',
+              status: 'ok',
+              latencyMs: 1234,
+              tokenCount: 456,
+              responsePayload: { verdict: 'malicious' },
+            },
+            {
+              type: 'tool',
+              toolName: 'SIEM',
+              callerAgent: 'Log Analysis Agent',
+              endpointUrl: '/api/siem/search',
+              status: 'ok',
+              latencyMs: 2345,
+              tokenCount: 567,
+              responsePayload: { events: 12 },
+            },
+          ],
+        }),
+      }),
+    )
+    const events = await collectSse(response)
+    const llmLog = events
+      .filter((event) => event.event === 'api_call')
+      .map((event) => event.data as LlmLog)
+      .find((log) => log.type === 'llm')
+    const report = events.find((event) => event.event === 'report')?.data as ReportEvent | undefined
+
+    expectCompleteReport(report)
+    expect.soft(llmLog?.responsePayload?.normalizedOutput).toMatchObject({
+      mitreMapping: [],
+      timeline: [],
+      containmentActions: [],
+      recommendations: [],
+      analystDecisions: [],
+      toolResultSummary: [],
+    })
+    expectFullLlmEvidence(llmLog as LlmLog)
   })
 
   it('returns full LLM audit evidence from all direct enterprise tool endpoints', async () => {

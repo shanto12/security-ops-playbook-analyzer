@@ -328,7 +328,11 @@ test('completes incident, tool evidence, approval, final report, exports, and re
   await expect(finalReport.getByText('Containment Actions')).toBeVisible()
   await expect(finalReport.getByText('Analyst Decisions')).toBeVisible()
   await expect(finalReport.getByText('Tool Result Summary')).toBeVisible()
+  await expect(finalReport.getByText('No report entries captured.')).toHaveCount(0)
+  await expect(finalReport.getByText('Credential Access', { exact: true })).toBeVisible()
+  await expect(finalReport.getByText('T1003 OS Credential Dumping')).toBeVisible()
   await expect(finalReport.getByText('VirusTotal: ok')).toBeVisible()
+  await expect(finalReport.getByText('approve isolate_host')).toBeVisible()
   await expect(finalReport.getByRole('button', { name: 'PDF' })).toBeEnabled()
 
   const download = page.waitForEvent('download')

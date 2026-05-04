@@ -128,25 +128,83 @@ function makeLlmAuditLog({
   })
 }
 
-function list(value: unknown) {
-  if (Array.isArray(value)) return value.map((item) => String(item))
-  if (typeof value === 'string' && value.trim()) return [value]
-  return []
+function reportText(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed || /no report entries captured/i.test(trimmed)) return undefined
+    return trimmed
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as Record<string, any>
+  if (record.title || record.detail) {
+    return [record.title, record.detail, record.outcome ? `[${record.outcome}]` : undefined]
+      .filter(Boolean)
+      .map(String)
+      .join(': ')
+  }
+  if (record.toolName) {
+    const tokens = typeof record.tokenCount === 'number' ? ` (${record.tokenCount} tokens)` : ''
+    return `${record.toolName}: ${record.status ?? 'ok'}${tokens}`
+  }
+  if (record.from && record.to) {
+    return `${record.from} -> ${record.to} (${record.kind ?? 'forward'}): ${record.reason ?? record.decision ?? 'routed'}`
+  }
+  try {
+    return JSON.stringify(record)
+  } catch {
+    return String(record)
+  }
 }
 
-function normalizeReport(report: any, incident: any, decision: string) {
-  return {
-    executiveSummary:
-      String(report?.executiveSummary ?? `Investigation for ${incident?.incidentId ?? 'the incident'} completed with analyst decision ${decision}.`),
-    rootCause: String(report?.rootCause ?? 'Root cause requires follow-up validation from endpoint and identity teams.'),
-    mitreMapping: list(report?.mitreMapping),
-    timeline: list(report?.timeline),
-    agentRouting: list(report?.agentRouting ?? report?.cycleSummary ?? report?.routingTrace),
-    containmentActions: list(report?.containmentActions),
-    recommendations: list(report?.recommendations),
-    analystDecisions: list(report?.analystDecisions),
-    toolResultSummary: list(report?.toolResultSummary),
+function firstText(...values: unknown[]) {
+  for (const value of values) {
+    const text = reportText(value)
+    if (text) return text
   }
+  return undefined
+}
+
+function list(value: unknown, fallback?: unknown, minCount = 1) {
+  const parse = (input: unknown) => {
+    if (Array.isArray(input)) return input.map(reportText).filter((item): item is string => Boolean(item))
+    const text = reportText(input)
+    return text ? [text] : []
+  }
+  const primary = parse(value)
+  if (primary.length >= minCount) return primary
+  const merged = [
+    ...primary,
+    ...parse(fallback).filter((item) => !primary.some((existing) => existing === item)),
+  ]
+  return merged
+}
+
+function normalizeReport(report: any, incident: any, decision: string, fallback: any = {}) {
+  const defaultSummary = `Investigation for ${incident?.incidentId ?? 'the incident'} completed with analyst decision ${decision}.`
+  const defaultRootCause = 'Root cause requires follow-up validation from endpoint and identity teams.'
+  return {
+    executiveSummary: firstText(report?.executiveSummary, fallback?.executiveSummary, defaultSummary) ?? defaultSummary,
+    rootCause: firstText(report?.rootCause, fallback?.rootCause, defaultRootCause) ?? defaultRootCause,
+    mitreMapping: list(report?.mitreMapping, fallback?.mitreMapping, 2),
+    timeline: list(report?.timeline, fallback?.timeline, 4),
+    agentRouting: list(report?.agentRouting ?? report?.cycleSummary ?? report?.routingTrace, fallback?.agentRouting),
+    containmentActions: list(report?.containmentActions, fallback?.containmentActions, 2),
+    recommendations: list(report?.recommendations, fallback?.recommendations, 4),
+    analystDecisions: list(report?.analystDecisions, fallback?.analystDecisions),
+    toolResultSummary: list(report?.toolResultSummary, fallback?.toolResultSummary, 2),
+  }
+}
+
+function summarizeTimeline(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return value.map(reportText).filter((item): item is string => Boolean(item))
+}
+
+function formatToolEvidence(log: Record<string, any>) {
+  const tokens = typeof log.tokenCount === 'number' ? `, ${log.tokenCount} tokens` : ''
+  const latency = typeof log.latencyMs === 'number' ? `, ${Math.round(log.latencyMs)}ms` : ''
+  return `${log.toolName}: ${log.status ?? 'ok'} via ${log.callerAgent ?? 'unknown agent'}${tokens}${latency}`
 }
 
 function summarizeApiLogs(value: unknown) {
@@ -157,10 +215,12 @@ function summarizeApiLogs(value: unknown) {
       const record = log as Record<string, any>
       const payload = record.parsedResponsePayload ?? record.responsePayload
       return {
+        type: record.type,
         toolName: record.toolName,
         callerAgent: record.callerAgent,
         endpointUrl: record.endpointUrl,
         status: record.status,
+        latencyMs: record.latencyMs,
         tokenCount: record.tokenCount,
         result: payload,
       }
@@ -405,6 +465,12 @@ export default async (req: Request) => {
         const priorToolResults = summarizeApiLogs(payload?.apiLogs)
         const routingTrace = summarizeRoutes(payload?.routes)
         const formattedRoutes = formatRoutes(routingTrace)
+        const timelineSummary = summarizeTimeline(payload?.timeline)
+        const enterpriseToolEvidence = priorToolResults.filter(
+          (log) =>
+            log.toolName &&
+            !['Agent Route', 'Cyclic Agent Route', 'Human Approval'].includes(String(log.toolName)),
+        )
         const ticketLogs = [
           syntheticTool('ServiceNow', '/api/servicenow/ticket', 'Ticketing Agent', ticketPayload, {
             number: `INC${Date.now().toString().slice(-7)}`,
@@ -431,10 +497,10 @@ export default async (req: Request) => {
         send('node_complete', { node: 'notification', timestamp: new Date().toISOString(), durationMs: 0 })
 
         const fallbackReport = {
-            executiveSummary: `${incident?.severity ?? 'High'} ${incident?.incidentType ?? 'security'} incident ${incident?.incidentId ?? ''} completed the automated investigation and analyst ${decision} path.`,
-            rootCause: `Signals indicate activity around ${incident?.affectedUser ?? 'the user'} on ${incident?.affectedHost ?? 'the host'} with IOC ${incident?.iocs?.ip ?? incident?.affectedIp ?? 'unknown'}.`,
+            executiveSummary: `${incident?.severity ?? 'High'} ${incident?.incidentType ?? 'security'} incident ${incident?.incidentId ?? ''} completed the cyclic LangGraph investigation with analyst decision ${decision}.`,
+            rootCause: `Correlated identity, endpoint, log, and threat intelligence evidence points to ${incident?.incidentType ?? 'malicious activity'} involving ${incident?.affectedUser ?? 'the affected user'} on ${incident?.affectedHost ?? 'the affected host'} with IOC ${incident?.iocs?.ip ?? incident?.iocs?.domain ?? incident?.affectedIp ?? 'unknown'}.`,
             mitreMapping: [incident?.mitreTactic, incident?.mitreTechnique].filter(Boolean),
-            timeline: [
+            timeline: timelineSummary.length ? timelineSummary : [
               'Incident generated and routed by supervisor',
               'Cyclic StateGraph route loop completed',
               'Parallel enrichment and investigation completed',
@@ -442,11 +508,20 @@ export default async (req: Request) => {
               'Ticketing and notifications completed',
             ],
             agentRouting: formattedRoutes.length ? formattedRoutes : ['Supervisor -> Triage -> Enrichment -> Log Analysis -> Enrichment -> Threat Intel -> Supervisor -> Containment'],
-            containmentActions: logs.map((log) => `${log.toolName}: ${JSON.stringify(log.responsePayload)}`),
-            recommendations: ['Validate affected identity sessions', 'Review endpoint process tree', 'Add IOC watchlist expiration', 'Run post-incident control review'],
-            analystDecisions: [`${decision} for ${payload?.approval?.actionName ?? 'containment'}`],
+            containmentActions: logs.length
+              ? logs.map((log) => `${log.toolName}: ${JSON.stringify(log.responsePayload)}`)
+              : [`No containment tool was executed because analyst decision was ${decision}.`],
+            recommendations: [
+              `Terminate active sessions and rotate credentials for ${incident?.affectedUser ?? 'the affected user'}.`,
+              `Review process ancestry and network connections on ${incident?.affectedHost ?? 'the affected host'}.`,
+              `Hunt for ${incident?.iocs?.domain ?? incident?.iocs?.ip ?? 'incident IOCs'} across SIEM, Microsoft 365, and cloud logs.`,
+              'Validate containment expiry, ticket ownership, and post-incident control improvements before closure.',
+            ],
+            analystDecisions: [
+              `${decision} ${payload?.approval?.actionName ?? 'containment'} for ${payload?.approval?.target ?? incident?.affectedHost ?? 'the target'} with arguments ${JSON.stringify(payload?.editedArguments ?? payload?.approval?.toolArguments ?? {})}`,
+            ],
             toolResultSummary: [
-              ...priorToolResults.map((log) => `${log.toolName}: ${log.status ?? 'ok'} (${log.tokenCount ?? 0} tokens)`),
+              ...enterpriseToolEvidence.map(formatToolEvidence),
               ...ticketLogs.map((log) => `${log.toolName}: ok`),
             ],
           }
@@ -466,12 +541,12 @@ export default async (req: Request) => {
                 executiveSummary: 'one sentence',
                 rootCause: 'one sentence',
                 mitreMapping: ['strings'],
-                timeline: ['four short strings'],
+                timeline: ['at least five non-empty strings'],
                 agentRouting: ['summarize each cyclic agent handoff, including backtrack edges'],
-                containmentActions: ['strings'],
-                recommendations: ['four strings'],
-                analystDecisions: ['strings'],
-                toolResultSummary: ['summarize each prior enterprise tool plus ticketing/notification result'],
+                containmentActions: ['at least two non-empty strings'],
+                recommendations: ['at least four non-empty strings'],
+                analystDecisions: ['at least one non-empty string'],
+                toolResultSummary: ['summarize each prior enterprise tool plus ticketing/notification result as non-empty strings'],
               },
             },
             send,
@@ -479,7 +554,7 @@ export default async (req: Request) => {
         } catch {
           rawReport = fallbackReport
         }
-        const report = normalizeReport(rawReport, incident, decision)
+        const report = normalizeReport(rawReport, incident, decision, fallbackReport)
         if (report.agentRouting.length === 0) {
           report.agentRouting = formattedRoutes.length
             ? formattedRoutes

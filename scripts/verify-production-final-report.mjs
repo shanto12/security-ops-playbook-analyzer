@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { chromium } from 'playwright'
 
 const baseUrl = process.argv[2] ?? 'https://security-ops-playbook-analyzer.netlify.app'
@@ -105,6 +105,41 @@ await finalReport.getByText('Executive Summary').waitFor({ timeout: 180_000 })
 const reportText = await finalReport.innerText()
 const missingSections = requiredReportSections.filter((section) => !reportText.includes(section))
 if (missingSections.length) throw new Error(`Final report missing sections: ${missingSections.join(', ')}`)
+if (reportText.includes('No report entries captured.')) {
+  throw new Error('Final report rendered one or more empty section placeholders')
+}
+const reportSectionCounts = await page.$$eval('#final-report h3', (headings) =>
+  headings.map((heading) => {
+    let node = heading.nextElementSibling
+    let items = 0
+    let text = ''
+    while (node && node.tagName !== 'H3') {
+      items += node.querySelectorAll('li').length
+      text += ` ${node.textContent ?? ''}`
+      node = node.nextElementSibling
+    }
+    return {
+      section: heading.textContent?.trim() ?? '',
+      items,
+      text: text.replace(/\s+/g, ' ').trim(),
+    }
+  }),
+)
+const listReportSections = [
+  'MITRE Mapping',
+  'Investigation Timeline',
+  'Agent Routing & Cycles',
+  'Containment Actions',
+  'Recommendations',
+  'Analyst Decisions',
+  'Tool Result Summary',
+]
+const emptyListSections = reportSectionCounts
+  .filter((row) => listReportSections.includes(row.section))
+  .filter((row) => row.items === 0)
+if (emptyListSections.length) {
+  throw new Error(`Final report list sections are empty: ${emptyListSections.map((row) => row.section).join(', ')}`)
+}
 
 const toolRows = await page.$$eval('details.apiRow.tool summary', (items) =>
   items.map((item) => {
@@ -130,6 +165,29 @@ await page.screenshot({ path: screenshotPaths.report, fullPage: true })
 const downloadPromise = page.waitForEvent('download')
 await finalReport.getByRole('button', { name: 'JSON' }).click()
 const jsonDownload = await downloadPromise
+const jsonPath = await jsonDownload.path()
+let exportedReportCounts = []
+if (jsonPath) {
+  const exported = JSON.parse(await readFile(jsonPath, 'utf8'))
+  const exportedReport = exported.report ?? {}
+  exportedReportCounts = listReportSections.map((section) => {
+    const key = {
+      'MITRE Mapping': 'mitreMapping',
+      'Investigation Timeline': 'timeline',
+      'Agent Routing & Cycles': 'agentRouting',
+      'Containment Actions': 'containmentActions',
+      Recommendations: 'recommendations',
+      'Analyst Decisions': 'analystDecisions',
+      'Tool Result Summary': 'toolResultSummary',
+    }[section]
+    const value = exportedReport[key]
+    return { section, count: Array.isArray(value) ? value.length : 0 }
+  })
+  const emptyExportFields = exportedReportCounts.filter((row) => row.count === 0)
+  if (emptyExportFields.length) {
+    throw new Error(`JSON export report fields are empty: ${emptyExportFields.map((row) => row.section).join(', ')}`)
+  }
+}
 
 const forkButton = page.getByRole('button', { name: 'Fork' }).first()
 await forkButton.click()
@@ -175,6 +233,12 @@ Screenshot artifacts:
 
 Final report sections verified:
 ${requiredReportSections.map((section) => `- ${section}`).join('\n')}
+
+Final report section item counts:
+${reportSectionCounts.map((row) => `- ${row.section}: ${row.items || 'text'} item(s)`).join('\n')}
+
+JSON export report item counts:
+${exportedReportCounts.map((row) => `- ${row.section}: ${row.count}`).join('\n')}
 
 Visible tool rows:
 
