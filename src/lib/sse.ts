@@ -7,6 +7,7 @@ export function parseSseFrames(buffer: string): { events: SseEvent[]; remainder:
 
   for (const chunk of chunks) {
     const lines = chunk.split(/\n/).filter(Boolean)
+    if (lines.length === 0 || lines.every((line) => line.startsWith(':'))) continue
     let event = 'message'
     const dataLines: string[] = []
 
@@ -16,10 +17,7 @@ export function parseSseFrames(buffer: string): { events: SseEvent[]; remainder:
       if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
     }
 
-    if (dataLines.length === 0) {
-      events.push({ event, data: {} })
-      continue
-    }
+    if (dataLines.length === 0) continue
 
     const dataText = dataLines.join('\n')
     try {

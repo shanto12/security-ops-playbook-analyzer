@@ -16,8 +16,116 @@ function extractJson(text: string): any {
   }
 }
 
+function parseProviderResponse(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { rawText: text }
+  }
+}
+
+const sensitiveKeyPattern =
+  /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i
+
+function sanitizeForLog(value: unknown, depth = 0): unknown {
+  if (depth > 12) return '[MaxDepth]'
+  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1))
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string') {
+      return value
+        .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+        .replace(/([?&](?:api[_-]?key|token|secret)=)[^&\s]+/gi, '$1[REDACTED]')
+    }
+    return value
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+      key,
+      sensitiveKeyPattern.test(key) ? '[REDACTED]' : sanitizeForLog(entry, depth + 1),
+    ]),
+  )
+}
+
 function makeLog(input: any) {
   return { id: crypto.randomUUID(), timestamp: new Date().toISOString(), ...input }
+}
+
+function makeLlmAuditLog({
+  callerAgent,
+  provider,
+  toolName,
+  model,
+  baseUrl,
+  requestBody,
+  rawResponse,
+  rawContent,
+  parsedOutput,
+  normalizedOutput,
+  usage,
+  latencyMs,
+  statusCode,
+  statusText,
+  ok,
+  errorMessage,
+}: {
+  callerAgent: string
+  provider: string
+  toolName: string
+  model: string
+  baseUrl: string
+  requestBody: unknown
+  rawResponse: unknown
+  rawContent?: string
+  parsedOutput?: unknown
+  normalizedOutput?: unknown
+  usage?: unknown
+  latencyMs: number
+  statusCode?: number
+  statusText?: string
+  ok: boolean
+  errorMessage?: string
+}) {
+  const endpointUrl = `${baseUrl}/chat/completions`
+  const usageRecord = usage && typeof usage === 'object' ? (usage as Record<string, unknown>) : undefined
+  return makeLog({
+    callerAgent,
+    toolName,
+    provider,
+    model,
+    baseUrl,
+    method: 'POST',
+    endpointUrl,
+    requestPayload: sanitizeForLog({
+      provider,
+      model,
+      baseUrl,
+      endpointPath: '/chat/completions',
+      endpointUrl,
+      method: 'POST',
+      body: requestBody,
+    }),
+    rawResponsePayload: sanitizeForLog(rawResponse),
+    parsedResponsePayload: sanitizeForLog(normalizedOutput ?? parsedOutput),
+    responsePayload: sanitizeForLog({
+      provider,
+      model,
+      statusCode,
+      statusText,
+      raw: rawResponse,
+      rawContent,
+      parsedOutput,
+      normalizedOutput: normalizedOutput ?? parsedOutput,
+      usage,
+      error: errorMessage,
+    }),
+    latencyMs,
+    tokenCount: typeof usageRecord?.total_tokens === 'number' ? usageRecord.total_tokens : undefined,
+    usage,
+    statusCode,
+    statusText,
+    status: ok ? 'ok' : 'error',
+    type: ok ? 'llm' : 'error',
+  })
 }
 
 function list(value: unknown) {
@@ -60,43 +168,109 @@ async function fireworksReport(prompt: unknown, send: (event: string, data: unkn
   if (!apiKey) throw new Error('FIREWORKS_API_KEY is not configured')
   const model = envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
   const baseUrl = envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
+  const requestBody = {
+    model,
+    temperature: 0.72,
+    max_tokens: 620,
+    reasoning_effort: 'none',
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: 'Return compact valid JSON only for a SOC incident report. No markdown.',
+      },
+      { role: 'user', content: JSON.stringify(prompt) },
+    ],
+  }
   const started = Date.now()
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Fireworks request failed'
+    send('api_call', makeLlmAuditLog({
+      callerAgent: 'Reporting Agent',
+      provider: 'fireworks',
+      toolName: 'Fireworks',
       model,
-      temperature: 0.72,
-      max_tokens: 620,
-      reasoning_effort: 'none',
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: 'Return compact valid JSON only for a SOC incident report. No markdown.',
-        },
-        { role: 'user', content: JSON.stringify(prompt) },
-      ],
-    }),
-  })
+      baseUrl,
+      requestBody,
+      rawResponse: null,
+      rawContent: '',
+      latencyMs: Date.now() - started,
+      ok: false,
+      errorMessage: message,
+    }))
+    throw error
+  }
   const text = await response.text()
-  if (!response.ok) throw new Error(`Fireworks ${response.status}: ${text.slice(0, 220)}`)
-  const parsed = JSON.parse(text)
-  const report = extractJson(parsed?.choices?.[0]?.message?.content ?? '{}')
-  send('api_call', makeLog({
+  const parsed = parseProviderResponse(text) as any
+  if (!response.ok) {
+    send('api_call', makeLlmAuditLog({
+      callerAgent: 'Reporting Agent',
+      provider: 'fireworks',
+      toolName: 'Fireworks',
+      model,
+      baseUrl,
+      requestBody,
+      rawResponse: parsed,
+      rawContent: text,
+      usage: parsed?.usage,
+      latencyMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: false,
+      errorMessage: `Fireworks ${response.status}: ${text.slice(0, 220)}`,
+    }))
+    throw new Error(`Fireworks ${response.status}: ${text.slice(0, 220)}`)
+  }
+  const content = parsed?.choices?.[0]?.message?.content ?? '{}'
+  let report: any
+  try {
+    report = extractJson(content)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Fireworks report parse failed'
+    send('api_call', makeLlmAuditLog({
+      callerAgent: 'Reporting Agent',
+      provider: 'fireworks',
+      toolName: 'Fireworks',
+      model,
+      baseUrl,
+      requestBody,
+      rawResponse: parsed,
+      rawContent: content,
+      usage: parsed?.usage,
+      latencyMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: false,
+      errorMessage: message,
+    }))
+    throw error
+  }
+  send('api_call', makeLlmAuditLog({
     callerAgent: 'Reporting Agent',
+    provider: 'fireworks',
     toolName: 'Fireworks',
-    method: 'POST',
-    endpointUrl: `${baseUrl}/chat/completions`,
-    requestPayload: { model, max_tokens: 620, reasoning_effort: 'none' },
-    responsePayload: report,
+    model,
+    baseUrl,
+    requestBody,
+    rawResponse: parsed,
+    rawContent: content,
+    parsedOutput: report,
+    normalizedOutput: report,
+    usage: parsed?.usage,
     latencyMs: Date.now() - started,
-    tokenCount: parsed?.usage?.total_tokens,
-    status: 'ok',
-    type: 'llm',
+    statusCode: response.status,
+    statusText: response.statusText,
+    ok: true,
   }))
   return report
 }
@@ -238,19 +412,8 @@ export default async (req: Request) => {
             },
             send,
           )
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Reporting provider failed'
-          send('api_call', makeLog({
-            callerAgent: 'Reporting Agent',
-            toolName: 'Fireworks',
-            method: 'POST',
-            endpointUrl: `${envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'}/chat/completions`,
-            requestPayload: { model: envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro' },
-            responsePayload: { message, fallback: 'deterministic-report' },
-            latencyMs: 0,
-            status: 'error',
-            type: 'error',
-          }))
+        } catch {
+          rawReport = fallbackReport
         }
         const report = normalizeReport(rawReport, incident, decision)
         send('delta', { node: 'Reporting Agent', content: JSON.stringify(report) })

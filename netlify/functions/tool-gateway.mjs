@@ -134,11 +134,34 @@ function extractJson(text) {
     return JSON.parse(match[0]);
   }
 }
+function parseProviderResponse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { rawText: text };
+  }
+}
+const sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
+function sanitizeForLog(value, depth = 0) {
+  if (depth > 12) return "[MaxDepth]";
+  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
+  if (!value || typeof value !== "object") {
+    if (typeof value === "string") return value.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      sensitiveKeyPattern.test(key) ? "[REDACTED]" : sanitizeForLog(entry, depth + 1)
+    ])
+  );
+}
 async function callGlm(spec, payload) {
   const apiKey = envValue("GLM_API_KEY");
   if (!apiKey) throw new Error("GLM_API_KEY is not configured");
   const model = envValue("GLM_TOOL_MODEL") || "glm-5-turbo";
   const baseUrl = envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
+  const endpointUrl = `${baseUrl}/chat/completions`;
   const incidentId = payload?.incident?.incidentId ?? payload?.incidentId ?? "unknown";
   const requestBody = {
     model,
@@ -172,24 +195,118 @@ async function callGlm(spec, payload) {
     ]
   };
   const started = Date.now();
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-      "accept-language": "en-US,en"
-    },
-    body: JSON.stringify(requestBody)
-  });
+  let response;
+  try {
+    response = await fetch(endpointUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        "accept-language": "en-US,en"
+      },
+      body: JSON.stringify(requestBody)
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "GLM request failed before response";
+    const requestPayload = sanitizeForLog({
+      provider: "z.ai",
+      model,
+      baseUrl,
+      endpointPath: "/chat/completions",
+      endpointUrl,
+      method: "POST",
+      body: requestBody
+    });
+    const llmAudit = {
+      id: crypto.randomUUID(),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      callerAgent: `${spec.name} Tool Simulator`,
+      toolName: "GLM-5.1",
+      provider: "z.ai",
+      model,
+      baseUrl,
+      method: "POST",
+      endpointUrl,
+      requestPayload,
+      responsePayload: sanitizeForLog({
+        provider: "z.ai",
+        model,
+        raw: null,
+        error: message
+      }),
+      latencyMs: Date.now() - started,
+      tokenCount: void 0,
+      usage: void 0,
+      status: "error",
+      type: "error"
+    };
+    const wrapped = error instanceof Error ? error : new Error(message);
+    wrapped.llmAudit = llmAudit;
+    throw wrapped;
+  }
   const text = await response.text();
-  if (!response.ok) throw new Error(`GLM ${response.status}: ${text.slice(0, 220)}`);
-  const data = JSON.parse(text);
+  const data = parseProviderResponse(text);
+  const makeAudit = (result2, error, rawContent = text) => ({
+    id: crypto.randomUUID(),
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    callerAgent: `${spec.name} Tool Simulator`,
+    toolName: "GLM-5.1",
+    provider: "z.ai",
+    model: data?.model ?? model,
+    baseUrl,
+    method: "POST",
+    endpointUrl,
+    requestPayload: sanitizeForLog({
+      provider: "z.ai",
+      model,
+      baseUrl,
+      endpointPath: "/chat/completions",
+      endpointUrl,
+      method: "POST",
+      body: requestBody
+    }),
+    rawResponsePayload: sanitizeForLog(data),
+    parsedResponsePayload: sanitizeForLog(result2),
+    responsePayload: sanitizeForLog({
+      provider: "z.ai",
+      model: data?.model ?? model,
+      statusCode: response.status,
+      statusText: response.statusText,
+      raw: data,
+      rawContent,
+      parsedOutput: result2,
+      normalizedOutput: result2,
+      usage: data?.usage,
+      error
+    }),
+    latencyMs: Date.now() - started,
+    status: response.ok ? "ok" : "error",
+    statusCode: response.status,
+    statusText: response.statusText,
+    tokenCount: data?.usage?.total_tokens,
+    usage: data?.usage,
+    type: response.ok ? "llm" : "error"
+  });
+  if (!response.ok) {
+    const error = new Error(`GLM ${response.status}: ${text.slice(0, 220)}`);
+    error.llmAudit = makeAudit(void 0, error.message);
+    throw error;
+  }
   const content = data?.choices?.[0]?.message?.content ?? "{}";
+  let result;
+  try {
+    result = extractJson(content);
+  } catch (error) {
+    const parseError = error instanceof Error ? error : new Error("GLM response parse failed");
+    parseError.llmAudit = makeAudit(void 0, parseError.message, content);
+    throw parseError;
+  }
   return {
-    result: extractJson(content),
+    result,
     usage: data?.usage ?? {},
     model: data?.model ?? model,
-    latencyMs: Date.now() - started
+    latencyMs: Date.now() - started,
+    llmAudit: makeAudit(result, void 0, content)
   };
 }
 var tool_gateway_default = async (req) => {
@@ -215,13 +332,16 @@ var tool_gateway_default = async (req) => {
       model: generated.model,
       usage: generated.usage,
       latencyMs: generated.latencyMs,
+      llmAudit: generated.llmAudit,
       data: generated.result
     });
   } catch (error) {
+    const llmAudit = error instanceof Error ? error.llmAudit : void 0;
     return jsonResponse(502, {
       tool: spec.name,
       endpoint: spec.path,
-      error: error instanceof Error ? error.message : "Tool generation failed"
+      error: error instanceof Error ? error.message : "Tool generation failed",
+      llmAudit
     });
   }
 };

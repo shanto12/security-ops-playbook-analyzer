@@ -27,6 +27,91 @@ function extractJson(text) {
     return JSON.parse(match[0]);
   }
 }
+function parseProviderResponse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { rawText: text };
+  }
+}
+const sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
+function sanitizeForLog(value, depth = 0) {
+  if (depth > 12) return "[MaxDepth]";
+  if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
+  if (!value || typeof value !== "object") {
+    if (typeof value === "string") {
+      return value.replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]").replace(/([?&](?:api[_-]?key|token|secret)=)[^&\s]+/gi, "$1[REDACTED]");
+    }
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      sensitiveKeyPattern.test(key) ? "[REDACTED]" : sanitizeForLog(entry, depth + 1)
+    ])
+  );
+}
+function makeLlmAuditLog({
+  callerAgent,
+  provider,
+  toolName,
+  model,
+  baseUrl,
+  endpointPath = "/chat/completions",
+  requestBody,
+  rawResponse,
+  rawContent,
+  parsedOutput,
+  normalizedOutput,
+  usage,
+  latencyMs,
+  statusCode,
+  statusText,
+  ok,
+  errorMessage
+}) {
+  const endpointUrl = `${baseUrl}${endpointPath}`;
+  const usageRecord = usage && typeof usage === "object" ? usage : void 0;
+  return makeLog({
+    callerAgent,
+    toolName,
+    provider,
+    model,
+    baseUrl,
+    method: "POST",
+    endpointUrl,
+    requestPayload: sanitizeForLog({
+      provider,
+      model,
+      baseUrl,
+      endpointPath,
+      endpointUrl,
+      method: "POST",
+      body: requestBody
+    }),
+    rawResponsePayload: sanitizeForLog(rawResponse),
+    parsedResponsePayload: sanitizeForLog(normalizedOutput ?? parsedOutput),
+    responsePayload: sanitizeForLog({
+      provider,
+      model,
+      statusCode,
+      statusText,
+      raw: rawResponse,
+      rawContent,
+      parsedOutput,
+      normalizedOutput: normalizedOutput ?? parsedOutput,
+      usage,
+      error: errorMessage
+    }),
+    latencyMs,
+    tokenCount: typeof usageRecord?.total_tokens === "number" ? usageRecord.total_tokens : void 0,
+    usage,
+    statusCode,
+    statusText,
+    status: ok ? "ok" : "error",
+    type: ok ? "llm" : "error"
+  });
+}
 function makeLog(input) {
   return { id: crypto.randomUUID(), timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...input };
 }
@@ -70,44 +155,113 @@ async function callFireworksJson({
   if (!apiKey) throw new Error("FIREWORKS_API_KEY is not configured");
   const model = envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro";
   const baseUrl = envValue("FIREWORKS_BASE_URL") || "https://api.fireworks.ai/inference/v1";
+  const endpointPath = "/chat/completions";
+  const requestBody = {
+    model,
+    temperature,
+    max_tokens: maxTokens,
+    reasoning_effort: "none",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: "You are an enterprise SOC graph orchestrator. Return minified valid JSON only."
+      },
+      { role: "user", content: prompt }
+    ]
+  };
   const started = Date.now();
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
+  let response;
+  try {
+    response = await fetch(`${baseUrl}${endpointPath}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify(requestBody)
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Fireworks request failed before response";
+    send("api_call", makeLlmAuditLog({
+      callerAgent: node,
+      provider: "fireworks",
+      toolName: "Fireworks",
       model,
-      temperature,
-      max_tokens: maxTokens,
-      reasoning_effort: "none",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "You are an enterprise SOC graph orchestrator. Return minified valid JSON only."
-        },
-        { role: "user", content: prompt }
-      ]
-    })
-  });
+      baseUrl,
+      endpointPath,
+      requestBody,
+      rawResponse: null,
+      latencyMs: Date.now() - started,
+      ok: false,
+      errorMessage: message
+    }));
+    throw error;
+  }
   const text = await response.text();
-  if (!response.ok) throw new Error(`Fireworks ${response.status}: ${text.slice(0, 240)}`);
-  const parsed = JSON.parse(text);
+  const parsed = parseProviderResponse(text);
+  if (!response.ok) {
+    send("api_call", makeLlmAuditLog({
+      callerAgent: node,
+      provider: "fireworks",
+      toolName: "Fireworks",
+      model,
+      baseUrl,
+      endpointPath,
+      requestBody,
+      rawResponse: parsed,
+      rawContent: text,
+      usage: parsed?.usage,
+      latencyMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: false,
+      errorMessage: `Fireworks ${response.status}: ${text.slice(0, 240)}`
+    }));
+    throw new Error(`Fireworks ${response.status}: ${text.slice(0, 240)}`);
+  }
   const content = parsed?.choices?.[0]?.message?.content ?? "{}";
-  const result = extractJson(content);
-  const log = makeLog({
+  let result;
+  try {
+    result = extractJson(content);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Fireworks response parse failed";
+    send("api_call", makeLlmAuditLog({
+      callerAgent: node,
+      provider: "fireworks",
+      toolName: "Fireworks",
+      model,
+      baseUrl,
+      endpointPath,
+      requestBody,
+      rawResponse: parsed,
+      rawContent: content,
+      usage: parsed?.usage,
+      latencyMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: false,
+      errorMessage: message
+    }));
+    throw error;
+  }
+  const log = makeLlmAuditLog({
     callerAgent: node,
+    provider: "fireworks",
     toolName: "Fireworks",
-    method: "POST",
-    endpointUrl: `${baseUrl}/chat/completions`,
-    requestPayload: { model, temperature, max_tokens: maxTokens, reasoning_effort: "none" },
-    responsePayload: result,
+    model,
+    baseUrl,
+    endpointPath,
+    requestBody,
+    rawResponse: parsed,
+    rawContent: content,
+    parsedOutput: result,
+    normalizedOutput: result,
+    usage: parsed?.usage,
     latencyMs: Date.now() - started,
-    tokenCount: parsed?.usage?.total_tokens,
-    status: "ok",
-    type: "llm"
+    statusCode: response.status,
+    statusText: response.statusText,
+    ok: true
   });
   send("api_call", log);
   return { result, log };
@@ -124,6 +278,7 @@ async function callGlmJson({
   const apiKey = requiredKey();
   const model = modelName || envValue("GLM_MODEL") || "glm-5.1";
   const baseUrl = envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
+  const endpointPath = "/chat/completions";
   const body = {
     model,
     thinking: { type: "disabled" },
@@ -140,38 +295,121 @@ async function callGlmJson({
     ]
   };
   const started = Date.now();
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-      "accept-language": "en-US,en"
-    },
-    body: JSON.stringify(body)
-  });
+  let response;
+  try {
+    response = await fetch(`${baseUrl}${endpointPath}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        "accept-language": "en-US,en"
+      },
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "GLM request failed before response";
+    send("api_call", makeLlmAuditLog({
+      callerAgent: node,
+      provider: "z.ai",
+      toolName: "GLM-5.1",
+      model,
+      baseUrl,
+      endpointPath,
+      requestBody: body,
+      rawResponse: null,
+      latencyMs: Date.now() - started,
+      ok: false,
+      errorMessage: message
+    }));
+    throw error;
+  }
   if (!streamDeltas) {
     const text = await response.text();
-    if (!response.ok) throw new Error(`GLM ${response.status}: ${text.slice(0, 240)}`);
-    const parsed = JSON.parse(text);
+    const parsed = parseProviderResponse(text);
+    if (!response.ok) {
+      send("api_call", makeLlmAuditLog({
+        callerAgent: node,
+        provider: "z.ai",
+        toolName: "GLM-5.1",
+        model,
+        baseUrl,
+        endpointPath,
+        requestBody: body,
+        rawResponse: parsed,
+        rawContent: text,
+        usage: parsed?.usage,
+        latencyMs: Date.now() - started,
+        statusCode: response.status,
+        statusText: response.statusText,
+        ok: false,
+        errorMessage: `GLM ${response.status}: ${text.slice(0, 240)}`
+      }));
+      throw new Error(`GLM ${response.status}: ${text.slice(0, 240)}`);
+    }
     const content2 = parsed?.choices?.[0]?.message?.content ?? "{}";
-    const result2 = extractJson(content2);
-    const log2 = makeLog({
+    let result2;
+    try {
+      result2 = extractJson(content2);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "GLM response parse failed";
+      send("api_call", makeLlmAuditLog({
+        callerAgent: node,
+        provider: "z.ai",
+        toolName: "GLM-5.1",
+        model,
+        baseUrl,
+        endpointPath,
+        requestBody: body,
+        rawResponse: parsed,
+        rawContent: content2,
+        usage: parsed?.usage,
+        latencyMs: Date.now() - started,
+        statusCode: response.status,
+        statusText: response.statusText,
+        ok: false,
+        errorMessage: message
+      }));
+      throw error;
+    }
+    const log2 = makeLlmAuditLog({
       callerAgent: node,
+      provider: "z.ai",
       toolName: "GLM-5.1",
-      method: "POST",
-      endpointUrl: `${baseUrl}/chat/completions`,
-      requestPayload: { model, temperature, max_tokens: maxTokens, thinking: "disabled" },
-      responsePayload: result2,
+      model,
+      baseUrl,
+      endpointPath,
+      requestBody: body,
+      rawResponse: parsed,
+      rawContent: content2,
+      parsedOutput: result2,
+      normalizedOutput: result2,
+      usage: parsed?.usage,
       latencyMs: Date.now() - started,
-      tokenCount: parsed?.usage?.total_tokens,
-      status: "ok",
-      type: "llm"
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: true
     });
     send("api_call", log2);
     return { result: result2, log: log2 };
   }
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => "");
+    send("api_call", makeLlmAuditLog({
+      callerAgent: node,
+      provider: "z.ai",
+      toolName: "GLM-5.1",
+      model,
+      baseUrl,
+      endpointPath,
+      requestBody: body,
+      rawResponse: parseProviderResponse(text),
+      rawContent: text,
+      latencyMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: false,
+      errorMessage: `GLM stream failed ${response.status}: ${text.slice(0, 240)}`
+    }));
     throw new Error(`GLM stream failed ${response.status}: ${text.slice(0, 240)}`);
   }
   const reader = response.body.getReader();
@@ -179,6 +417,7 @@ async function callGlmJson({
   let buffer = "";
   let content = "";
   let usage = void 0;
+  const rawChunks = [];
   for (; ; ) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -189,6 +428,7 @@ async function callGlmJson({
       const line = frame.split(/\n/).find((candidate) => candidate.startsWith("data:"))?.slice(5).trim();
       if (!line || line === "[DONE]") continue;
       const chunk = JSON.parse(line);
+      rawChunks.push(chunk);
       usage = chunk?.usage ?? usage;
       const delta = chunk?.choices?.[0]?.delta?.content ?? "";
       if (delta) {
@@ -197,18 +437,47 @@ async function callGlmJson({
       }
     }
   }
-  const result = extractJson(content);
-  const log = makeLog({
+  let result;
+  try {
+    result = extractJson(content);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "GLM stream response parse failed";
+    send("api_call", makeLlmAuditLog({
+      callerAgent: node,
+      provider: "z.ai",
+      toolName: "GLM-5.1",
+      model,
+      baseUrl,
+      endpointPath,
+      requestBody: body,
+      rawResponse: { chunks: rawChunks },
+      rawContent: content,
+      usage,
+      latencyMs: Date.now() - started,
+      statusCode: response.status,
+      statusText: response.statusText,
+      ok: false,
+      errorMessage: message
+    }));
+    throw error;
+  }
+  const log = makeLlmAuditLog({
     callerAgent: node,
+    provider: "z.ai",
     toolName: "GLM-5.1",
-    method: "POST",
-    endpointUrl: `${baseUrl}/chat/completions`,
-    requestPayload: { model, temperature, max_tokens: maxTokens, stream: true, thinking: "disabled" },
-    responsePayload: result,
+    model,
+    baseUrl,
+    endpointPath,
+    requestBody: body,
+    rawResponse: { chunks: rawChunks },
+    rawContent: content,
+    parsedOutput: result,
+    normalizedOutput: result,
+    usage,
     latencyMs: Date.now() - started,
-    tokenCount: usage?.total_tokens,
-    status: "ok",
-    type: "llm"
+    statusCode: response.status,
+    statusText: response.statusText,
+    ok: true
   });
   send("api_call", log);
   return { result, log };
@@ -378,26 +647,13 @@ data: ${JSON.stringify(data)}
               maxTokens: 420,
               send
             });
-            if (!orchestratedRun.result?.incident && !orchestratedRun.result?.i) {
+            const fireworksResult = orchestratedRun.result;
+            if (!fireworksResult?.incident && !fireworksResult?.i) {
               throw new Error("Fireworks orchestration JSON missed required graph keys");
             }
           } catch (error) {
             const message = error instanceof Error ? error.message : "Fireworks orchestration failed";
             timeline("Fireworks fallback", `Falling back to Z.ai GLM tool model: ${message}`, "warning", send);
-            send(
-              "api_call",
-              makeLog({
-                callerAgent: "Supervisor Graph Orchestrator",
-                toolName: "Fireworks",
-                method: "POST",
-                endpointUrl: `${envValue("FIREWORKS_BASE_URL") || "https://api.fireworks.ai/inference/v1"}/chat/completions`,
-                requestPayload: { model: envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro" },
-                responsePayload: { message },
-                latencyMs: 0,
-                status: "error",
-                type: "error"
-              })
-            );
           }
         }
         orchestratedRun ??= await callGlmJson({

@@ -27,6 +27,8 @@ import type {
   FinalReport,
   HealthResponse,
   Incident,
+  LlmEvidence,
+  LlmMessage,
   RunState,
   SseEvent,
   TimelineEvent,
@@ -62,6 +64,132 @@ function shortTime(value?: string) {
 function duration(ms?: number) {
   if (!ms) return '0.0s'
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function getString(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function firstString(...values: unknown[]) {
+  for (const value of values) {
+    const stringValue = getString(value)
+    if (stringValue) return stringValue
+  }
+  return undefined
+}
+
+function firstValue(...values: unknown[]) {
+  for (const value of values) {
+    if (value !== undefined && value !== null) return value
+  }
+  return undefined
+}
+
+function messageList(value: unknown): LlmMessage[] | undefined {
+  return Array.isArray(value) ? (value as LlmMessage[]) : undefined
+}
+
+function findMessages(value: unknown): LlmMessage[] | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findMessages(item)
+      if (found) return found
+    }
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  const messages = messageList(record.messages)
+  if (messages?.length) return messages
+
+  for (const entry of Object.values(record)) {
+    const found = findMessages(entry)
+    if (found) return found
+  }
+  return undefined
+}
+
+function findPrompt(value: unknown): unknown {
+  if (!value || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findPrompt(item)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  if (typeof record.prompt === 'string' && record.prompt.trim()) return record.prompt
+
+  for (const entry of Object.values(record)) {
+    const found = findPrompt(entry)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
+function inferProvider(log: ApiLogEntry) {
+  const request = isRecord(log.requestPayload) ? log.requestPayload : {}
+  const evidence = log.llmEvidence
+  const explicit = firstString(log.provider, evidence?.provider, request.provider)
+  if (explicit) return explicit
+  if (/fireworks/i.test(`${log.toolName} ${log.endpointUrl}`)) return 'Fireworks'
+  if (/glm|z\.ai|api\.z\.ai/i.test(`${log.toolName} ${log.endpointUrl}`)) return 'Z.ai'
+  return log.toolName
+}
+
+function inferModel(log: ApiLogEntry) {
+  const request = isRecord(log.requestPayload) ? log.requestPayload : {}
+  const response = isRecord(log.responsePayload) ? log.responsePayload : {}
+  return firstString(log.model, log.llmEvidence?.model, request.model, response.model, log.toolName)
+}
+
+function extractPrompt(log: ApiLogEntry, messages?: LlmMessage[]) {
+  const request = isRecord(log.requestPayload) ? log.requestPayload : {}
+  const evidence = log.llmEvidence
+  const directPrompt = firstValue(log.prompt, evidence?.prompt, request.prompt, findPrompt(request))
+  if (directPrompt !== undefined) return directPrompt
+  const userMessage = [...(messages ?? [])].reverse().find((item) => item.role === 'user')
+  return userMessage?.content
+}
+
+function buildLlmEvidence(log: ApiLogEntry): LlmEvidence {
+  const request = isRecord(log.requestPayload) ? log.requestPayload : {}
+  const evidence = log.llmEvidence
+  const messages = messageList(log.messages) ?? messageList(evidence?.messages) ?? findMessages(request)
+  const parsedResponsePayload = firstValue(log.parsedResponsePayload, evidence?.parsedResponsePayload, log.responsePayload)
+
+  return {
+    provider: inferProvider(log),
+    model: inferModel(log),
+    endpoint: firstString(evidence?.endpoint, log.endpointUrl),
+    method: firstString(evidence?.method, log.method),
+    latencyMs: evidence?.latencyMs ?? log.latencyMs,
+    status: evidence?.status ?? log.status,
+    statusCode: evidence?.statusCode ?? log.statusCode,
+    tokenCount: evidence?.tokenCount ?? log.tokenCount,
+    prompt: extractPrompt(log, messages),
+    messages,
+    requestPayload: firstValue(evidence?.requestPayload, log.requestPayload),
+    rawResponsePayload: firstValue(log.rawResponsePayload, evidence?.rawResponsePayload),
+    parsedResponsePayload,
+  }
+}
+
+function normalizeApiLog(log: ApiLogEntry): ApiLogEntry {
+  if (log.type !== 'llm') return log
+  return {
+    ...log,
+    provider: log.provider ?? inferProvider(log),
+    model: log.model ?? inferModel(log),
+    llmEvidence: buildLlmEvidence(log),
+  }
 }
 
 function applyRunEvent(current: RunState, item: SseEvent): RunState {
@@ -114,7 +242,7 @@ function applyRunEvent(current: RunState, item: SseEvent): RunState {
     case 'checkpoint':
       return { ...current, checkpoints: [...current.checkpoints, item.data as Checkpoint] }
     case 'api_call':
-      return { ...current, apiLogs: [...current.apiLogs, item.data as ApiLogEntry] }
+      return { ...current, apiLogs: [...current.apiLogs, normalizeApiLog(item.data as ApiLogEntry)] }
     case 'delta': {
       const data = item.data as { content: string }
       return { ...current, streamText: `${current.streamText}${data.content}` }
@@ -341,6 +469,84 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
   )
 }
 
+function formatPayload(value: unknown, emptyLabel = 'Not included in this SSE log') {
+  if (value === undefined || value === null) return emptyLabel
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function PayloadPanel({
+  title,
+  value,
+  emptyLabel,
+}: {
+  title: string
+  value: unknown
+  emptyLabel?: string
+}) {
+  return (
+    <div className="payloadPanel">
+      <strong>{title}</strong>
+      <pre>{formatPayload(value, emptyLabel)}</pre>
+    </div>
+  )
+}
+
+function LlmLogDetails({ log }: { log: ApiLogEntry }) {
+  const evidence = buildLlmEvidence(log)
+  const promptMessages = evidence.messages?.length ? evidence.messages : evidence.prompt
+
+  return (
+    <div className="llmEvidence">
+      <div className="evidenceMeta">
+        <span>
+          <small>Provider / model</small>
+          <strong>
+            {evidence.provider ?? '--'} / {evidence.model ?? '--'}
+          </strong>
+        </span>
+        <span>
+          <small>Endpoint</small>
+          <strong>{evidence.endpoint ?? log.endpointUrl}</strong>
+        </span>
+        <span>
+          <small>Latency</small>
+          <strong>{evidence.latencyMs ?? 0}ms</strong>
+        </span>
+        <span>
+          <small>Status</small>
+          <strong>
+            {evidence.statusCode ? `${evidence.statusCode} ` : ''}
+            {evidence.status ?? log.status}
+          </strong>
+        </span>
+        <span>
+          <small>Tokens</small>
+          <strong>{evidence.tokenCount ?? 0}</strong>
+        </span>
+      </div>
+      <div className="apiPayloads llmPayloads">
+        <PayloadPanel
+          title="Prompt / messages"
+          value={promptMessages}
+          emptyLabel="Prompt/messages were not included in this SSE log entry."
+        />
+        <PayloadPanel title="Request payload" value={evidence.requestPayload} />
+        <PayloadPanel
+          title="Raw response payload"
+          value={evidence.rawResponsePayload}
+          emptyLabel="Raw provider response was not included separately in this SSE log entry."
+        />
+        <PayloadPanel title="Parsed response payload" value={evidence.parsedResponsePayload} />
+      </div>
+    </div>
+  )
+}
+
 function ApiLog({ logs }: { logs: ApiLogEntry[] }) {
   const [filter, setFilter] = useState('all')
   const filtered = filter === 'all' ? logs : logs.filter((log) => log.type === filter)
@@ -371,12 +577,16 @@ function ApiLog({ logs }: { logs: ApiLogEntry[] }) {
                 <strong>{log.toolName}</strong>
                 <small>{log.callerAgent}</small>
                 <em>{log.latencyMs}ms</em>
-                {log.tokenCount ? <b>{log.tokenCount} tok</b> : null}
+                <b>{log.tokenCount ?? 0} tok</b>
               </summary>
-              <div className="apiPayloads">
-                <pre>{JSON.stringify(log.requestPayload, null, 2)}</pre>
-                <pre>{JSON.stringify(log.responsePayload, null, 2)}</pre>
-              </div>
+              {log.type === 'llm' ? (
+                <LlmLogDetails log={log} />
+              ) : (
+                <div className="apiPayloads">
+                  <PayloadPanel title="Request payload" value={log.requestPayload} />
+                  <PayloadPanel title="Response payload" value={log.responsePayload} />
+                </div>
+              )}
             </details>
           ))
         )}

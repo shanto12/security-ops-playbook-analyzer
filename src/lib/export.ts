@@ -80,6 +80,7 @@ export function buildRunExport(state: RunState) {
     checkpoints: state.checkpoints,
     timeline: state.timeline,
     apiLogs: state.apiLogs,
+    apiTransparencyLog: state.apiLogs,
     approval: state.approval,
     report: state.report,
   }

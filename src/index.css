@@ -468,6 +468,9 @@ pre {
   border-radius: 7px;
   color: #cce4e1;
   font-size: 11px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 summary {
@@ -547,6 +550,53 @@ summary {
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   padding: 0 11px 11px;
+}
+
+.payloadPanel > strong {
+  display: block;
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.llmEvidence {
+  padding-top: 1px;
+}
+
+.evidenceMeta {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 11px 10px;
+}
+
+.evidenceMeta span {
+  min-width: 0;
+  border: 1px solid rgba(105, 215, 255, 0.18);
+  background: rgba(105, 215, 255, 0.055);
+  border-radius: 7px;
+  padding: 9px;
+}
+
+.evidenceMeta small,
+.payloadPanel > strong {
+  color: var(--muted);
+}
+
+.evidenceMeta strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llmPayloads {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .guideGrid {
@@ -707,7 +757,8 @@ summary {
   .metricsRow,
   .incident__grid,
   .graph,
-  .apiPayloads {
+  .apiPayloads,
+  .evidenceMeta {
     grid-template-columns: 1fr;
   }
 

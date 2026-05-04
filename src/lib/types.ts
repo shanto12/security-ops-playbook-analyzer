@@ -1,6 +1,29 @@
 export type Severity = 'Critical' | 'High' | 'Medium' | 'Low'
 export type AgentStatus = 'pending' | 'running' | 'complete' | 'failed' | 'paused'
 export type ApiLogType = 'llm' | 'tool' | 'human' | 'error'
+export type ApiLogStatus = 'ok' | 'error' | string
+
+export interface LlmMessage {
+  role?: string
+  content?: unknown
+  [key: string]: unknown
+}
+
+export interface LlmEvidence {
+  provider?: string
+  model?: string
+  endpoint?: string
+  method?: string
+  latencyMs?: number
+  status?: ApiLogStatus
+  statusCode?: number
+  tokenCount?: number
+  prompt?: unknown
+  messages?: LlmMessage[]
+  requestPayload?: unknown
+  rawResponsePayload?: unknown
+  parsedResponsePayload?: unknown
+}
 
 export interface HealthResponse {
   service: string
@@ -71,12 +94,20 @@ export interface ApiLogEntry {
   toolName: string
   method: string
   endpointUrl: string
+  provider?: string
+  model?: string
   requestPayload: unknown
   responsePayload: unknown
+  rawResponsePayload?: unknown
+  parsedResponsePayload?: unknown
+  prompt?: unknown
+  messages?: LlmMessage[]
+  statusCode?: number
   latencyMs: number
   tokenCount?: number
-  status: 'ok' | 'error'
+  status: ApiLogStatus
   type: ApiLogType
+  llmEvidence?: LlmEvidence
 }
 
 export interface ApprovalRequest {
