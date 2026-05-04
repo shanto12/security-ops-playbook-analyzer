@@ -1,5 +1,21 @@
 import type { Config } from '@netlify/functions'
 
+function envValue(name: string): string | undefined {
+  const netlify = (globalThis as any).Netlify
+  return netlify?.env?.get?.(name) ?? process.env[name]
+}
+
+function extractJson(text: string): any {
+  const direct = text.trim()
+  try {
+    return JSON.parse(direct)
+  } catch {
+    const match = direct.match(/\{[\s\S]*\}/)
+    if (!match) throw new Error('Provider response did not include JSON')
+    return JSON.parse(match[0])
+  }
+}
+
 function makeLog(input: any) {
   return { id: crypto.randomUUID(), timestamp: new Date().toISOString(), ...input }
 }
@@ -37,6 +53,52 @@ function syntheticTool(name: string, endpoint: string, agent: string, payload: a
     status: 'ok',
     type: 'tool',
   })
+}
+
+async function fireworksReport(prompt: unknown, send: (event: string, data: unknown) => void) {
+  const apiKey = envValue('FIREWORKS_API_KEY')
+  if (!apiKey) throw new Error('FIREWORKS_API_KEY is not configured')
+  const model = envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
+  const baseUrl = envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
+  const started = Date.now()
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.72,
+      max_tokens: 620,
+      reasoning_effort: 'none',
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: 'Return compact valid JSON only for a SOC incident report. No markdown.',
+        },
+        { role: 'user', content: JSON.stringify(prompt) },
+      ],
+    }),
+  })
+  const text = await response.text()
+  if (!response.ok) throw new Error(`Fireworks ${response.status}: ${text.slice(0, 220)}`)
+  const parsed = JSON.parse(text)
+  const report = extractJson(parsed?.choices?.[0]?.message?.content ?? '{}')
+  send('api_call', makeLog({
+    callerAgent: 'Reporting Agent',
+    toolName: 'Fireworks',
+    method: 'POST',
+    endpointUrl: `${baseUrl}/chat/completions`,
+    requestPayload: { model, max_tokens: 620, reasoning_effort: 'none' },
+    responsePayload: report,
+    latencyMs: Date.now() - started,
+    tokenCount: parsed?.usage?.total_tokens,
+    status: 'ok',
+    type: 'llm',
+  }))
+  return report
 }
 
 function checkpoint(node: string, state: Record<string, unknown>, send: (event: string, data: unknown) => void) {
@@ -139,8 +201,7 @@ export default async (req: Request) => {
         send('node_complete', { node: 'ticketing', timestamp: new Date().toISOString(), durationMs: 0 })
         send('node_complete', { node: 'notification', timestamp: new Date().toISOString(), durationMs: 0 })
 
-        const report = normalizeReport(
-          {
+        const fallbackReport = {
             executiveSummary: `${incident?.severity ?? 'High'} ${incident?.incidentType ?? 'security'} incident ${incident?.incidentId ?? ''} completed the automated investigation and analyst ${decision} path.`,
             rootCause: `Signals indicate activity around ${incident?.affectedUser ?? 'the user'} on ${incident?.affectedHost ?? 'the host'} with IOC ${incident?.iocs?.ip ?? incident?.affectedIp ?? 'unknown'}.`,
             mitreMapping: [incident?.mitreTactic, incident?.mitreTechnique].filter(Boolean),
@@ -154,10 +215,44 @@ export default async (req: Request) => {
             recommendations: ['Validate affected identity sessions', 'Review endpoint process tree', 'Add IOC watchlist expiration', 'Run post-incident control review'],
             analystDecisions: [`${decision} for ${payload?.approval?.actionName ?? 'containment'}`],
             toolResultSummary: ticketLogs.map((log) => `${log.toolName}: ok`),
-          },
-          incident,
-          decision,
-        )
+          }
+        let rawReport = fallbackReport
+        try {
+          rawReport = await fireworksReport(
+            {
+              incident,
+              decision,
+              approval: payload.approval,
+              containmentResults: logs.map((log) => log.responsePayload),
+              ticketingResults: ticketLogs.map((log) => log.responsePayload),
+              requiredShape: {
+                executiveSummary: 'one sentence',
+                rootCause: 'one sentence',
+                mitreMapping: ['strings'],
+                timeline: ['four short strings'],
+                containmentActions: ['strings'],
+                recommendations: ['four strings'],
+                analystDecisions: ['strings'],
+                toolResultSummary: ['strings'],
+              },
+            },
+            send,
+          )
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Reporting provider failed'
+          send('api_call', makeLog({
+            callerAgent: 'Reporting Agent',
+            toolName: 'Fireworks',
+            method: 'POST',
+            endpointUrl: `${envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'}/chat/completions`,
+            requestPayload: { model: envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro' },
+            responsePayload: { message, fallback: 'deterministic-report' },
+            latencyMs: 0,
+            status: 'error',
+            type: 'error',
+          }))
+        }
+        const report = normalizeReport(rawReport, incident, decision)
         send('delta', { node: 'Reporting Agent', content: JSON.stringify(report) })
         send('report', report)
         checkpoint('reporting', { report }, send)
