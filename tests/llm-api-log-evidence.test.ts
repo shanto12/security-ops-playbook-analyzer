@@ -99,6 +99,15 @@ function expectFullLlmEvidence(log: LlmLog) {
   expect.soft(containsPromptOrMessages(log.requestPayload)).toBe(true)
 }
 
+function expectToolModelEvidence(log: LlmLog) {
+  expect.soft(log.type).toBe('tool')
+  expect.soft(log.status).toBe('ok')
+  expect.soft(log.responsePayload).toEqual(expect.any(Object))
+  expect.soft(log.tokenCount).toEqual(expect.any(Number))
+  expect.soft(log.tokenCount).toBeGreaterThan(0)
+  expect.soft(containsPromptOrMessages(log.requestPayload)).toBe(true)
+}
+
 async function collectSse(response: Response) {
   const events: SseEvent[] = []
   await consumeSse(response, (event) => events.push(event))
@@ -123,8 +132,14 @@ describe('LLM API log evidence', () => {
       .filter((event) => event.event === 'api_call')
       .map((event) => event.data as LlmLog)
       .filter((log) => log.type === 'llm')
+    const toolLogs = events
+      .filter((event) => event.event === 'api_call')
+      .map((event) => event.data as LlmLog)
+      .filter((log) => log.type === 'tool')
 
     expect.soft(llmLogs).toHaveLength(1)
+    expect.soft(toolLogs).toHaveLength(10)
+    toolLogs.forEach(expectToolModelEvidence)
     expect.soft(events.some((event) => event.event === 'approval_required')).toBe(true)
     expect.soft(events.at(-1)?.event).toBe('done')
     expectFullLlmEvidence(llmLogs[0])

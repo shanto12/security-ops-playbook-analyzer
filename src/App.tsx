@@ -182,8 +182,19 @@ function buildLlmEvidence(log: ApiLogEntry): LlmEvidence {
   }
 }
 
+function hasModelEvidence(log: ApiLogEntry) {
+  return Boolean(
+    log.type === 'llm' ||
+      log.provider ||
+      log.model ||
+      log.rawResponsePayload ||
+      log.parsedResponsePayload ||
+      log.llmEvidence,
+  )
+}
+
 function normalizeApiLog(log: ApiLogEntry): ApiLogEntry {
-  if (log.type !== 'llm') return log
+  if (!hasModelEvidence(log)) return log
   return {
     ...log,
     provider: log.provider ?? inferProvider(log),
@@ -579,7 +590,7 @@ function ApiLog({ logs }: { logs: ApiLogEntry[] }) {
                 <em>{log.latencyMs}ms</em>
                 <b>{log.tokenCount ?? 0} tok</b>
               </summary>
-              {log.type === 'llm' ? (
+              {hasModelEvidence(log) ? (
                 <LlmLogDetails log={log} />
               ) : (
                 <div className="apiPayloads">
