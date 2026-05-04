@@ -205,7 +205,7 @@ Health:
 - Provider: ${health.provider}
 - Model: ${health.model}
 - Tool model: ${health.toolModel}
-- Fireworks model: ${health.fireworksModel}
+- Orchestration provider: ${health.orchestrationProvider ?? health.provider}
 
 SSE event counts:
 - agent-run: ${JSON.stringify(agentRun.counts)}

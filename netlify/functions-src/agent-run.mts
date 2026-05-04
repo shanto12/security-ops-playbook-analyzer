@@ -207,144 +207,9 @@ function requiredKey() {
   return apiKey
 }
 
-function fireworksKey() {
-  return envValue('FIREWORKS_API_KEY')
-}
-
 function requestTimeout(name: string, fallbackMs: number) {
   const configured = Number(envValue(name))
   return Number.isFinite(configured) && configured > 0 ? configured : fallbackMs
-}
-
-async function callFireworksJson({
-  node,
-  prompt,
-  temperature = 0.72,
-  maxTokens = 700,
-  send,
-}: {
-  node: string
-  prompt: string
-  temperature?: number
-  maxTokens?: number
-  send: (event: string, data: unknown) => void
-}) {
-  const apiKey = fireworksKey()
-  if (!apiKey) throw new Error('FIREWORKS_API_KEY is not configured')
-
-  const model = envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
-  const baseUrl = envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
-  const endpointPath = '/chat/completions'
-  const requestBody = {
-    model,
-    temperature,
-    max_tokens: maxTokens,
-    reasoning_effort: 'none',
-    response_format: { type: 'json_object' },
-    messages: [
-      {
-        role: 'system',
-        content: 'You are an enterprise SOC graph orchestrator. Return minified valid JSON only.',
-      },
-      { role: 'user', content: prompt },
-    ],
-  }
-  const started = Date.now()
-  let response: Response
-  try {
-    response = await fetch(`${baseUrl}${endpointPath}`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-      },
-      signal: AbortSignal.timeout(requestTimeout('FIREWORKS_TIMEOUT_MS', 9_000)),
-      body: JSON.stringify(requestBody),
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Fireworks request failed before response'
-    send('api_call', makeLlmAuditLog({
-      callerAgent: node,
-      provider: 'fireworks',
-      toolName: 'Fireworks',
-      model,
-      baseUrl,
-      endpointPath,
-      requestBody,
-      rawResponse: null,
-      latencyMs: Date.now() - started,
-      ok: false,
-      errorMessage: message,
-    }))
-    throw error
-  }
-  const text = await response.text()
-  const parsed = parseProviderResponse(text) as any
-  if (!response.ok) {
-    send('api_call', makeLlmAuditLog({
-      callerAgent: node,
-      provider: 'fireworks',
-      toolName: 'Fireworks',
-      model,
-      baseUrl,
-      endpointPath,
-      requestBody,
-      rawResponse: parsed,
-      rawContent: text,
-      usage: parsed?.usage,
-      latencyMs: Date.now() - started,
-      statusCode: response.status,
-      statusText: response.statusText,
-      ok: false,
-      errorMessage: `Fireworks ${response.status}: ${text.slice(0, 240)}`,
-    }))
-    throw new Error(`Fireworks ${response.status}: ${text.slice(0, 240)}`)
-  }
-  const content = parsed?.choices?.[0]?.message?.content ?? '{}'
-  let result: unknown
-  try {
-    result = extractJson(content)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Fireworks response parse failed'
-    send('api_call', makeLlmAuditLog({
-      callerAgent: node,
-      provider: 'fireworks',
-      toolName: 'Fireworks',
-      model,
-      baseUrl,
-      endpointPath,
-      requestBody,
-      rawResponse: parsed,
-      rawContent: content,
-      usage: parsed?.usage,
-      latencyMs: Date.now() - started,
-      statusCode: response.status,
-      statusText: response.statusText,
-      ok: false,
-      errorMessage: message,
-    }))
-    throw error
-  }
-  const log = makeLlmAuditLog({
-    callerAgent: node,
-    provider: 'fireworks',
-    toolName: 'Fireworks',
-    model,
-    baseUrl,
-    endpointPath,
-    requestBody,
-    rawResponse: parsed,
-    rawContent: content,
-    parsedOutput: result,
-    normalizedOutput: result,
-    usage: parsed?.usage,
-    latencyMs: Date.now() - started,
-    statusCode: response.status,
-    statusText: response.statusText,
-    ok: true,
-  })
-  send('api_call', log)
-  return { result, log }
 }
 
 async function callGlmJson({
@@ -705,22 +570,7 @@ export default async (req: Request) => {
 
         send('node_start', { node: 'incident_generator', timestamp: new Date().toISOString() })
         const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}. i must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet(one line). a={actionName,target,toolArguments,riskJustification}. Keep text short.`
-        let orchestratedRun
-        if (fireworksKey()) {
-          try {
-            orchestratedRun = await callFireworksJson({
-              node: 'Supervisor Graph Orchestrator',
-              prompt: orchestrationPrompt,
-              temperature: 0.82,
-              maxTokens: 420,
-              send,
-            })
-          } catch (error) {
-            const message = error instanceof Error ? error.message : 'Fireworks orchestration failed'
-            timeline('Fireworks fallback', `Falling back to Z.ai GLM only because Fireworks failed: ${message}`, 'warning', send)
-          }
-        }
-        orchestratedRun ??= await callGlmJson({
+        const orchestratedRun = await callGlmJson({
           node: 'Supervisor Graph Orchestrator',
           prompt: orchestrationPrompt,
           temperature: 0.9,

@@ -3,7 +3,14 @@ import { chromium } from 'playwright'
 
 const baseUrl = process.argv[2] ?? 'https://security-ops-playbook-analyzer.netlify.app'
 const outputPath = process.argv[3] ?? `docs/final-report-proof-${new Date().toISOString().slice(0, 10)}.md`
-const screenshotPath = process.argv[4] ?? 'docs/evidence/production-final-report-flow.png'
+const screenshotPrefix = (process.argv[4] ?? 'docs/evidence/production-final-report-flow').replace(/\.png$/i, '')
+const screenshotPaths = {
+  initial: `${screenshotPrefix}-01-initial.png`,
+  approval: `${screenshotPrefix}-02-approval-waiting-tools.png`,
+  tools: `${screenshotPrefix}-03-tool-llm-evidence.png`,
+  report: `${screenshotPrefix}-04-final-report.png`,
+  replay: `${screenshotPrefix}-05-replay-proof.png`,
+}
 
 const requiredReportSections = [
   'Executive Summary',
@@ -17,7 +24,7 @@ const requiredReportSections = [
 ]
 
 await mkdir(outputPath.split('/').slice(0, -1).join('/'), { recursive: true })
-await mkdir(screenshotPath.split('/').slice(0, -1).join('/'), { recursive: true })
+await mkdir(screenshotPrefix.split('/').slice(0, -1).join('/'), { recursive: true })
 
 const startedAt = new Date().toISOString()
 const browser = await chromium.launch({ headless: true })
@@ -25,11 +32,13 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 1300 }, ac
 page.on('dialog', (dialog) => dialog.dismiss().catch(() => undefined))
 
 await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+await page.screenshot({ path: screenshotPaths.initial, fullPage: true })
 await page.getByRole('button', { name: /Generate Incident/i }).click()
 
 const approve = page.getByRole('button', { name: /^Approve$/i })
 await approve.waitFor({ timeout: 150_000 })
 const approvalDisabledBeforeTools = await approve.isDisabled()
+await page.screenshot({ path: screenshotPaths.approval, fullPage: true })
 
 await page.waitForFunction(
   () => {
@@ -51,6 +60,7 @@ await page.waitForFunction(
   null,
   { timeout: 30_000 },
 )
+await page.screenshot({ path: screenshotPaths.tools, fullPage: true })
 
 await approve.click()
 const finalReport = page.locator('#final-report')
@@ -73,6 +83,13 @@ const reportRows = await page.$$eval('details.apiRow.llm summary', (items) =>
     .filter((text) => /Reporting Agent|GLM-5\.1/i.test(text)),
 )
 if (reportRows.length === 0) throw new Error('No Reporting Agent LLM row was visible in the API log')
+const failedRowsBeforeReplay = await page.$$eval('details.apiRow.error summary', (items) =>
+  items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+)
+if (failedRowsBeforeReplay.length) {
+  throw new Error(`API Transparency Log contains failed rows before replay: ${failedRowsBeforeReplay.join(' | ')}`)
+}
+await page.screenshot({ path: screenshotPaths.report, fullPage: true })
 
 const downloadPromise = page.waitForEvent('download')
 await finalReport.getByRole('button', { name: 'JSON' }).click()
@@ -81,8 +98,14 @@ const jsonDownload = await downloadPromise
 const forkButton = page.getByRole('button', { name: 'Fork' }).first()
 await forkButton.click()
 await page.getByText(/Forked/i).waitFor({ timeout: 180_000 })
+const failedRowsAfterReplay = await page.$$eval('details.apiRow.error summary', (items) =>
+  items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+)
+if (failedRowsAfterReplay.length) {
+  throw new Error(`API Transparency Log contains failed rows after replay: ${failedRowsAfterReplay.join(' | ')}`)
+}
 
-await page.screenshot({ path: screenshotPath, fullPage: true })
+await page.screenshot({ path: screenshotPaths.replay, fullPage: true })
 const finishedAt = new Date().toISOString()
 
 const markdown = `# Final Report Production Proof
@@ -97,8 +120,15 @@ Evidence:
 - Approval disabled before tool evidence completed: ${approvalDisabledBeforeTools ? 'yes' : 'no'}
 - Tool rows with nonzero tokens: ${toolRows.length}
 - Reporting Agent LLM rows visible: ${reportRows.length}
+- Failed API Transparency Log rows: 0
 - JSON export filename: ${jsonDownload.suggestedFilename()}
-- Screenshot artifact: ${screenshotPath}
+
+Screenshot artifacts:
+- Initial live app: ${screenshotPaths.initial}
+- Approval card waiting for tool evidence: ${screenshotPaths.approval}
+- Ten LLM-backed tool rows visible: ${screenshotPaths.tools}
+- Final report rendered: ${screenshotPaths.report}
+- Replay proof after checkpoint fork: ${screenshotPaths.replay}
 
 Final report sections verified:
 ${requiredReportSections.map((section) => `- ${section}`).join('\n')}
@@ -119,4 +149,4 @@ Verification window:
 
 await browser.close()
 await writeFile(outputPath, markdown)
-console.log(JSON.stringify({ outputPath, screenshotPath, toolRows: toolRows.length, reportRows: reportRows.length, finishedAt }, null, 2))
+console.log(JSON.stringify({ outputPath, screenshotPaths, toolRows: toolRows.length, reportRows: reportRows.length, failedRows: 0, finishedAt }, null, 2))

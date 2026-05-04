@@ -322,10 +322,10 @@ async function callEnterpriseTool(tool: EnterpriseTool, incident: Incident): Pro
 
 async function callEnterpriseToolWithRetry(tool: EnterpriseTool, incident: Incident) {
   let lastLog: ApiLogEntry | undefined
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     lastLog = await callEnterpriseTool(tool, incident)
     if (lastLog.status === 'ok' && lastLog.tokenCount && lastLog.tokenCount > 0) return lastLog
-    await wait(1500 + attempt * 1500)
+    await wait(1800 + attempt * 2200)
   }
   return lastLog as ApiLogEntry
 }
