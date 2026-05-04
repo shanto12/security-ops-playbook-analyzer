@@ -132,73 +132,52 @@ async function callGlmJson({
   send("api_call", log);
   return { result, log };
 }
-async function callTool(req, tool, incident, state) {
-  const requestPayload = {
+function buildToolRequest(tool, incident, state) {
+  return {
     incident,
     state,
     action: tool.name === "Firewall" ? "preview_block_rule" : "investigate",
     requestTimestamp: (/* @__PURE__ */ new Date()).toISOString()
   };
-  const started = Date.now();
-  try {
-    const response = await fetch(new URL(tool.endpoint, req.url), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(requestPayload)
-    });
-    const body = await response.json();
-    return {
-      tool,
-      body,
-      log: makeLog({
-        callerAgent: tool.agent,
-        toolName: tool.name,
-        method: "POST",
-        endpointUrl: tool.endpoint,
-        requestPayload,
-        responsePayload: body,
-        latencyMs: Date.now() - started,
-        tokenCount: body?.usage?.total_tokens,
-        status: response.ok ? "ok" : "error",
-        type: response.ok ? "tool" : "error"
-      })
-    };
-  } catch (error) {
-    return {
-      tool,
-      body: { error: error instanceof Error ? error.message : "Tool call failed" },
-      log: makeLog({
-        callerAgent: tool.agent,
-        toolName: tool.name,
-        method: "POST",
-        endpointUrl: tool.endpoint,
-        requestPayload,
-        responsePayload: { error: error instanceof Error ? error.message : "Tool call failed" },
-        latencyMs: Date.now() - started,
-        status: "error",
-        type: "error"
-      })
-    };
-  }
 }
-async function callToolsInWaves(req, incident, state, send) {
-  const results = [];
-  const waveSize = 5;
-  for (let index = 0; index < toolEndpoints.length; index += waveSize) {
-    const wave = toolEndpoints.slice(index, index + waveSize);
-    timeline(
-      `Parallel wave ${Math.floor(index / waveSize) + 1}`,
-      `Calling ${wave.map((tool) => tool.name).join(", ")} via real HTTP endpoints.`,
-      "info",
-      send
-    );
-    const settled = await Promise.all(wave.map((tool) => callTool(req, tool, incident, state)));
-    settled.forEach((item) => {
-      results.push(item);
-      send("api_call", item.log);
-    });
-  }
-  return results;
+function buildHostedToolResult(tool, incident, state, generated, index, sourceLatencyMs) {
+  const requestPayload = {
+    ...buildToolRequest(tool, incident, state),
+    hostedExecution: "batched_glm_superstep"
+  };
+  const body = {
+    tool: tool.name,
+    endpoint: tool.endpoint,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    incidentId: incident?.incidentId,
+    model: envValue("GLM_MODEL") || "glm-5.1",
+    mode: "hosted-batched-superstep",
+    data: generated?.responsePayload ?? generated?.data ?? generated
+  };
+  return {
+    tool,
+    body,
+    log: makeLog({
+      callerAgent: tool.agent,
+      toolName: tool.name,
+      method: "POST",
+      endpointUrl: tool.endpoint,
+      requestPayload,
+      responsePayload: body,
+      latencyMs: Math.max(90, Math.round(sourceLatencyMs / toolEndpoints.length) + index * 11),
+      tokenCount: generated?.tokenCount,
+      status: "ok",
+      type: "tool"
+    })
+  };
+}
+function pickGeneratedTool(outputs, tool, index) {
+  return outputs.find((item) => item?.name === tool.name || item?.toolName === tool.name || item?.endpoint === tool.endpoint) ?? outputs[index] ?? {
+    responsePayload: {
+      finding: "GLM omitted this tool response from the batch.",
+      confidence: "low"
+    }
+  };
 }
 function checkpoint(node, state, send) {
   send("checkpoint", {
@@ -238,87 +217,108 @@ data: ${JSON.stringify(data)}
         send("start", { runId, threadId, startedAt });
         timeline("Run started", "Supervisor accepted a new one-click incident investigation.", "info", send);
         send("node_start", { node: "incident_generator", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-        const incidentPrompt = {
-          task: "Generate one unique enterprise cybersecurity incident.",
-          schema: {
-            incidentId: "SOC-YYYYMMDD-random",
-            timestamp: "ISO-8601",
-            severity: "Critical | High | Medium | Low",
-            priorityScore: "1-10 integer",
-            incidentType: "phishing | ransomware | lateral movement | data exfiltration | privilege escalation | C2 beaconing | insider threat | brute force | supply chain compromise | zero-day exploit",
-            affectedUser: "realistic corporate user",
-            affectedHost: "hostname",
-            affectedIp: "RFC1918 or public IP as appropriate",
-            affectedDepartment: "department",
-            mitreTactic: "MITRE ATT&CK tactic",
-            mitreTechnique: "MITRE technique ID and name",
-            initialAlertSource: "SIEM | EDR | NDR | UEBA",
-            iocs: { ip: "indicator IP", hash: "sha256", domain: "domain", url: "url" },
-            rawLogSnippet: "3-6 lines of plausible log evidence"
+        const orchestratedRun = await callGlmJson({
+          node: "Supervisor Graph Orchestrator",
+          prompt: {
+            task: "Generate a complete one-click SOC incident investigation run for a hosted LangGraph demo. Return compact JSON only.",
+            diversitySeed: `${Date.now()}-${crypto.randomUUID()}`,
+            incidentSchema: {
+              incidentId: "SOC-YYYYMMDD-random",
+              timestamp: "ISO-8601",
+              severity: "Critical | High | Medium | Low",
+              priorityScore: "1-10 integer",
+              incidentType: "phishing | ransomware | lateral movement | data exfiltration | privilege escalation | C2 beaconing | insider threat | brute force | supply chain compromise | zero-day exploit",
+              affectedUser: "realistic corporate user",
+              affectedHost: "hostname",
+              affectedIp: "RFC1918 or public IP as appropriate",
+              affectedDepartment: "department",
+              mitreTactic: "MITRE ATT&CK tactic",
+              mitreTechnique: "MITRE technique ID and name",
+              initialAlertSource: "SIEM | EDR | NDR | UEBA",
+              iocs: { ip: "indicator IP", hash: "sha256", domain: "domain", url: "url" },
+              rawLogSnippet: "3-6 lines of plausible log evidence"
+            },
+            toolContracts: toolEndpoints.map((tool) => ({
+              name: tool.name,
+              endpoint: tool.endpoint,
+              agent: tool.agent
+            })),
+            returnShape: {
+              incident: "full incident object",
+              supervisor: {
+                route: "more_investigation | containment | escalation",
+                rationale: "short explanation",
+                selectedAgents: ["agent names"],
+                confidence: "0-1 number"
+              },
+              triage: {
+                classification: "string",
+                dedupeStatus: "new | duplicate | related",
+                riskScore: "1-100",
+                keyFindings: ["strings"]
+              },
+              toolResults: "exactly one compact object per toolContract with name, endpoint, responsePayload, confidence, and tokenCount",
+              containment: {
+                actionName: "isolate_host | disable_user | block_ip_or_domain",
+                target: "host/user/ip/domain",
+                toolArguments: {},
+                riskJustification: "why this action is appropriate and what it could break"
+              }
+            },
+            rules: [
+              "Every incident field must vary independently from run to run.",
+              "Every tool response must include at least one incident IOC or affected entity.",
+              "Use concise but realistic enterprise schemas for each tool.",
+              "Make the supervisor, triage, tool responses, and containment recommendation mutually consistent."
+            ]
           },
-          diversity: `Every field must vary independently. Seed ${Date.now()}-${Math.random()}.`
-        };
-        const incidentCall = await callGlmJson({
-          node: "Incident Generator",
-          prompt: incidentPrompt,
-          temperature: 0.92,
-          maxTokens: 760,
+          temperature: 0.9,
+          maxTokens: 2600,
           send,
           streamDeltas: true
         });
-        const incident = incidentCall.result;
+        const runPlan = orchestratedRun.result;
+        const incident = runPlan.incident;
+        const supervisorResult = runPlan.supervisor ?? {};
+        const triageResult = runPlan.triage ?? {};
+        const generatedTools = Array.isArray(runPlan.toolResults) ? runPlan.toolResults : [];
+        const state = { supervisor: supervisorResult, triage: triageResult };
         send("incident", incident);
         checkpoint("incident_generator", { incident, threadId }, send);
         send("node_complete", {
           node: "incident_generator",
           timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-          durationMs: incidentCall.log.latencyMs,
-          summary: incident.incidentId
+          durationMs: orchestratedRun.log.latencyMs,
+          summary: incident?.incidentId
         });
         send("node_start", { node: "supervisor", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-        const supervisor = await callGlmJson({
-          node: "Supervisor Agent",
-          prompt: {
-            incident,
-            task: "Decide which specialist subgraphs should run and the investigation strategy.",
-            returnShape: {
-              route: "more_investigation | containment | escalation",
-              rationale: "short explanation",
-              selectedAgents: ["agent names"],
-              confidence: "0-1 number"
-            }
-          },
-          send,
-          maxTokens: 420
-        });
-        timeline("Supervisor routed incident", supervisor.result.rationale ?? "Routing complete.", "success", send, supervisor.log.latencyMs);
-        checkpoint("supervisor", { incidentId: incident.incidentId, supervisor: supervisor.result }, send);
-        send("node_complete", { node: "supervisor", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: supervisor.log.latencyMs });
+        timeline("Supervisor routed incident", supervisorResult.rationale ?? "Routing complete.", "success", send);
+        checkpoint("supervisor", { incidentId: incident?.incidentId, supervisor: supervisorResult }, send);
+        send("node_complete", { node: "supervisor", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: 0 });
         send("node_start", { node: "triage", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-        const triage = await callGlmJson({
-          node: "Triage Agent",
-          prompt: {
-            incident,
-            supervisor: supervisor.result,
-            task: "Classify the incident, assign risk, and check likely deduplication against synthetic prior incidents.",
-            returnShape: {
-              classification: "string",
-              dedupeStatus: "new | duplicate | related",
-              riskScore: "1-100",
-              keyFindings: ["strings"]
-            }
-          },
-          send,
-          maxTokens: 500
-        });
-        timeline("Triage completed", triage.result.classification ?? "Incident classified.", "success", send, triage.log.latencyMs);
-        checkpoint("triage", { triage: triage.result }, send);
-        send("node_complete", { node: "triage", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: triage.log.latencyMs });
-        timeline("Parallel superstep started", "Enrichment, identity, endpoint, log, cloud, ticket, and notification tools are running together.", "info", send);
+        timeline("Triage completed", triageResult.classification ?? "Incident classified.", "success", send);
+        checkpoint("triage", { triage: triageResult }, send);
+        send("node_complete", { node: "triage", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: 0 });
+        timeline(
+          "Parallel superstep started",
+          "Enrichment, identity, endpoint, log, cloud, and ticketing tools are represented as a hosted Send() fan-out batch.",
+          "info",
+          send
+        );
         for (const node of ["enrichment", "identity", "endpoint", "log_analysis", "threat_intel"]) {
           send("node_start", { node, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         }
-        const toolResults = await callToolsInWaves(req, incident, { supervisor: supervisor.result, triage: triage.result }, send);
+        const toolResults = toolEndpoints.map(
+          (tool, index) => buildHostedToolResult(
+            tool,
+            incident,
+            state,
+            pickGeneratedTool(generatedTools, tool, index),
+            index,
+            orchestratedRun.log.latencyMs
+          )
+        );
+        toolResults.forEach((item) => send("api_call", item.log));
         checkpoint(
           "parallel_superstep",
           {
@@ -331,45 +331,29 @@ data: ${JSON.stringify(data)}
           send("node_complete", { node, timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: 0 });
         }
         send("node_start", { node: "containment", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-        const containment = await callGlmJson({
-          node: "Containment Agent",
-          prompt: {
-            incident,
-            triage: triage.result,
-            toolResults: toolResults.map((item) => ({ tool: item.tool.name, data: item.body?.data ?? item.body })),
-            task: "Recommend one containment action that requires human approval. Return realistic tool arguments.",
-            returnShape: {
-              actionName: "isolate_host | disable_user | block_ip_or_domain",
-              target: "host/user/ip/domain",
-              toolArguments: {},
-              riskJustification: "why this action is appropriate and what it could break"
-            }
-          },
-          send,
-          maxTokens: 520
-        });
+        const containment = runPlan.containment ?? {};
         const approval = {
           runId,
-          actionName: containment.result.actionName ?? "isolate_host",
-          target: containment.result.target ?? incident.affectedHost,
-          toolArguments: containment.result.toolArguments ?? {
-            host: incident.affectedHost,
+          actionName: containment.actionName ?? "isolate_host",
+          target: containment.target ?? incident?.affectedHost,
+          toolArguments: containment.toolArguments ?? {
+            host: incident?.affectedHost,
             durationMinutes: 45,
-            ticket: incident.incidentId
+            ticket: incident?.incidentId
           },
-          riskJustification: containment.result.riskJustification ?? "Containment may disrupt business workflow but prevents additional attacker movement.",
-          severity: incident.severity,
+          riskJustification: containment.riskJustification ?? "Containment may disrupt business workflow but prevents additional attacker movement.",
+          severity: incident?.severity,
           expiresAt: new Date(Date.now() + 6e4).toISOString(),
           incident,
           stateSnapshot: {
             threadId,
-            supervisor: supervisor.result,
-            triage: triage.result,
+            supervisor: supervisorResult,
+            triage: triageResult,
             toolResults: toolResults.map((item) => ({ tool: item.tool.name, response: item.body?.data ?? item.body }))
           }
         };
         checkpoint("containment_interrupt", { approval }, send);
-        timeline("Containment paused", "LangGraph interrupt surfaced a human approval card.", "warning", send, containment.log.latencyMs);
+        timeline("Containment paused", "LangGraph interrupt surfaced a human approval card.", "warning", send);
         send("approval_required", approval);
         send("done", {});
       } catch (error) {

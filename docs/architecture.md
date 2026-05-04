@@ -23,6 +23,10 @@ The public demo is optimized for Netlify:
 - **Streaming:** GLM deltas and graph events stream over SSE.
 - **Transparency:** every LLM/tool/human call appears in the API log.
 
+## Hosted Execution Note
+
+The production Netlify SSE path uses a GLM-generated hosted superstep for the first ten enterprise tool results so the approval interrupt is reached reliably inside Netlify's synchronous function window. The individual tool endpoints remain independently callable GLM-backed HTTP routes for live endpoint demonstrations.
+
 ## Netlify vs FastAPI Note
 
-The original requirement mentioned ten FastAPI servers. Netlify Functions do not host long-running Python FastAPI processes, so the deployed implementation uses Netlify-native HTTP endpoints for the best interview experience. The UI and API surface still demonstrate the enterprise investigation pattern with real HTTP calls and live GLM-generated responses.
+The original requirement mentioned ten FastAPI servers. Netlify Functions do not host long-running Python FastAPI processes, so the deployed implementation uses Netlify-native HTTP endpoints for the best interview experience. The UI and API surface still demonstrate the enterprise investigation pattern with real HTTP endpoints and live GLM-generated responses.
