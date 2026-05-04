@@ -8,6 +8,9 @@ export interface HealthResponse {
   mode: 'live-glm' | 'missing-key'
   provider: string
   model: string
+  toolModel?: string
+  orchestrationProvider?: string
+  fireworksModel?: string | null
   endpoint: string
   checkedAt: string
   capabilities: Record<string, boolean>

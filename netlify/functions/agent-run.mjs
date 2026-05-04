@@ -32,6 +32,61 @@ function requiredKey() {
   if (!apiKey) throw new Error("GLM_API_KEY is not configured");
   return apiKey;
 }
+function fireworksKey() {
+  return envValue("FIREWORKS_API_KEY");
+}
+async function callFireworksJson({
+  node,
+  prompt,
+  temperature = 0.72,
+  maxTokens = 700,
+  send
+}) {
+  const apiKey = fireworksKey();
+  if (!apiKey) throw new Error("FIREWORKS_API_KEY is not configured");
+  const model = envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro";
+  const baseUrl = envValue("FIREWORKS_BASE_URL") || "https://api.fireworks.ai/inference/v1";
+  const started = Date.now();
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      model,
+      temperature,
+      max_tokens: maxTokens,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: "You are an enterprise SOC graph orchestrator. Return minified valid JSON only."
+        },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Fireworks ${response.status}: ${text.slice(0, 240)}`);
+  const parsed = JSON.parse(text);
+  const content = parsed?.choices?.[0]?.message?.content ?? "{}";
+  const result = extractJson(content);
+  const log = makeLog({
+    callerAgent: node,
+    toolName: "Fireworks",
+    method: "POST",
+    endpointUrl: `${baseUrl}/chat/completions`,
+    requestPayload: { model, temperature, max_tokens: maxTokens },
+    responsePayload: result,
+    latencyMs: Date.now() - started,
+    tokenCount: parsed?.usage?.total_tokens,
+    status: "ok",
+    type: "llm"
+  });
+  send("api_call", log);
+  return { result, log };
+}
 async function callGlmJson({
   node,
   prompt,
@@ -144,15 +199,15 @@ function buildToolRequest(tool, incident, state) {
 function buildHostedToolResult(tool, incident, state, generated, index, sourceLatencyMs) {
   const requestPayload = {
     ...buildToolRequest(tool, incident, state),
-    hostedExecution: "batched_glm_superstep"
+    hostedExecution: "batched_provider_superstep"
   };
   const body = {
     tool: tool.name,
     endpoint: tool.endpoint,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     incidentId: incident?.incidentId,
-    model: envValue("GLM_TOOL_MODEL") || "glm-5-turbo",
-    mode: "hosted-batched-superstep",
+    model: fireworksKey() ? envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro" : envValue("GLM_TOOL_MODEL") || "glm-5-turbo",
+    mode: fireworksKey() ? "hosted-fireworks-superstep" : "hosted-batched-superstep",
     data: generated?.responsePayload ?? generated?.data ?? generated
   };
   return {
@@ -219,9 +274,16 @@ data: ${JSON.stringify(data)}
         timeline("Run started", "Supervisor accepted a new one-click incident investigation.", "info", send);
         send("node_start", { node: "incident_generator", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         const compactTools = toolEndpoints.map((tool) => `${tool.name}:${tool.endpoint}`).join("; ");
-        const orchestratedRun = await callGlmJson({
+        const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Keys: incident, supervisor, triage, toolResults, containment. incident must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet. supervisor={route,rationale,selectedAgents,confidence}. triage={classification,dedupeStatus,riskScore,keyFindings}. toolResults must have exactly 10 items in this order: ${compactTools}. Each item={name,endpoint,responsePayload:{verdict,evidence},confidence}. containment={actionName,target,toolArguments,riskJustification}. Keep evidence short and include incident IOC/entity.`;
+        const orchestratedRun = fireworksKey() ? await callFireworksJson({
           node: "Supervisor Graph Orchestrator",
-          prompt: `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Keys: incident, supervisor, triage, toolResults, containment. incident must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet. supervisor={route,rationale,selectedAgents,confidence}. triage={classification,dedupeStatus,riskScore,keyFindings}. toolResults must have exactly 10 items in this order: ${compactTools}. Each item={name,endpoint,responsePayload:{verdict,evidence},confidence}. containment={actionName,target,toolArguments,riskJustification}. Keep evidence short and include incident IOC/entity.`,
+          prompt: orchestrationPrompt,
+          temperature: 0.82,
+          maxTokens: 700,
+          send
+        }) : await callGlmJson({
+          node: "Supervisor Graph Orchestrator",
+          prompt: orchestrationPrompt,
           temperature: 0.9,
           maxTokens: 700,
           send,

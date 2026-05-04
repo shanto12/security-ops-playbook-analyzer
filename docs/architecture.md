@@ -7,8 +7,9 @@ The public demo is optimized for Netlify:
 - React + Vite single-page UI.
 - Netlify Functions for `/api/health`, `/api/agent-run`, `/api/resume-run`, `/api/replay-run`, and the enterprise tool gateway.
 - Server-Sent Events for long-running graph execution.
-- Z.ai GLM-5.1 for incident generation, supervisor decisions, containment reasoning, and reporting.
+- Z.ai GLM-5.1 for incident generation, containment reasoning, reporting, and fallback orchestration.
 - Z.ai GLM-5-Turbo for corporate tool endpoints because it is optimized for tool-heavy agent workflows and keeps the hosted demo under Netlify function limits.
+- Fireworks `deepseek-v4-pro` for the hosted pre-approval graph superstep when configured, because it keeps the live approval path comfortably under Netlify's timeout.
 
 ## LangGraph Concepts Shown
 
@@ -25,7 +26,7 @@ The public demo is optimized for Netlify:
 
 ## Hosted Execution Note
 
-The production Netlify SSE path uses a GLM-5-Turbo hosted superstep for the first ten enterprise tool results so the approval interrupt is reached reliably inside Netlify's synchronous function window. The completed GLM JSON is replayed into the SSE stream as small chunks for visible streaming, and the individual tool endpoints remain independently callable GLM-backed HTTP routes for live endpoint demonstrations.
+The production Netlify SSE path uses Fireworks `deepseek-v4-pro` when configured, with GLM-5-Turbo as fallback, for the first ten enterprise tool results so the approval interrupt is reached reliably inside Netlify's synchronous function window. The completed provider JSON is replayed into the SSE stream as small chunks for visible streaming, and the individual tool endpoints remain independently callable GLM-backed HTTP routes for live endpoint demonstrations.
 
 ## Netlify vs FastAPI Note
 

@@ -45,9 +45,12 @@ GLM_API_KEY=<z.ai key>
 GLM_MODEL=glm-5.1
 GLM_TOOL_MODEL=glm-5-turbo
 GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
+FIREWORKS_API_KEY=<optional fireworks key>
+FIREWORKS_MODEL=accounts/fireworks/models/deepseek-v4-pro
+FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1
 ```
 
-The browser never receives the key. Local development reads it from environment variables; production stores it as a secret Netlify env var.
+The browser never receives provider keys. Local development reads them from environment variables; production stores them as Netlify environment variables.
 
 ## Commands
 
