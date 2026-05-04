@@ -16,7 +16,7 @@ import {
   Workflow,
   X,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { graphNodes, toolEndpoints } from './data/graph'
 import { buildRunExport, downloadJson, downloadReportPdf } from './lib/export'
 import { consumeSse } from './lib/sse'
@@ -200,6 +200,144 @@ function normalizeApiLog(log: ApiLogEntry): ApiLogEntry {
     provider: log.provider ?? inferProvider(log),
     model: log.model ?? inferModel(log),
     llmEvidence: buildLlmEvidence(log),
+  }
+}
+
+type EnterpriseTool = (typeof toolEndpoints)[number]
+
+function numberValue(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function toolPayload(tool: EnterpriseTool, incident: Incident) {
+  return {
+    incident,
+    tool: tool.name,
+    callerAgent: tool.agent,
+    endpoint: tool.endpoint,
+    source: 'langgraph-send-fanout',
+    requestTimestamp: new Date().toISOString(),
+    action: 'investigate',
+  }
+}
+
+function toolEvidenceLog(
+  tool: EnterpriseTool,
+  payload: Record<string, unknown>,
+  body: unknown,
+  responseStatus: number,
+  responseStatusText: string,
+  elapsedMs: number,
+): ApiLogEntry {
+  const responseBody = isRecord(body) ? body : {}
+  const audit = isRecord(responseBody.llmAudit) ? responseBody.llmAudit : {}
+  const tokenCount = numberValue(audit.tokenCount)
+  const status = responseStatus >= 200 && responseStatus < 300 && audit.status === 'ok' && Boolean(tokenCount)
+  const provider = firstString(audit.provider)
+  const model = firstString(audit.model)
+  const endpoint = firstString(audit.endpointUrl, audit.endpoint)
+  const requestPayload = firstValue(audit.requestPayload, {})
+  const rawResponsePayload = firstValue(audit.rawResponsePayload, responseBody)
+  const parsedResponsePayload = firstValue(audit.parsedResponsePayload, responseBody.data, responseBody)
+  const statusCode = numberValue(audit.statusCode) ?? responseStatus
+  const statusText = firstString(audit.statusText) ?? responseStatusText
+  const latencyMs = numberValue(audit.latencyMs) ?? elapsedMs
+
+  return normalizeApiLog({
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    callerAgent: tool.agent,
+    toolName: tool.name,
+    provider,
+    model,
+    method: 'POST',
+    endpointUrl: tool.endpoint,
+    requestPayload: {
+      toolEndpoint: {
+        method: 'POST',
+        endpointUrl: tool.endpoint,
+        body: payload,
+      },
+      llmRequest: requestPayload,
+    },
+    responsePayload: {
+      toolEndpointResponse: responseBody,
+      llmResponse: firstValue(audit.responsePayload, responseBody),
+    },
+    rawResponsePayload,
+    parsedResponsePayload,
+    latencyMs,
+    tokenCount,
+    statusCode,
+    statusText,
+    status: status ? 'ok' : 'error',
+    type: status ? 'tool' : 'error',
+    llmEvidence: {
+      provider,
+      model,
+      endpoint,
+      method: 'POST',
+      latencyMs,
+      status: status ? 'ok' : 'error',
+      statusCode,
+      tokenCount,
+      requestPayload,
+      rawResponsePayload,
+      parsedResponsePayload,
+    },
+  })
+}
+
+async function callEnterpriseTool(tool: EnterpriseTool, incident: Incident): Promise<ApiLogEntry> {
+  const payload = toolPayload(tool, incident)
+  const started = Date.now()
+  try {
+    const response = await fetch(tool.endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    const body = await response.json().catch(() => ({ error: 'Tool endpoint returned non-JSON response' }))
+    return toolEvidenceLog(tool, payload, body, response.status, response.statusText, Date.now() - started)
+  } catch (error) {
+    return normalizeApiLog({
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      callerAgent: tool.agent,
+      toolName: tool.name,
+      method: 'POST',
+      endpointUrl: tool.endpoint,
+      requestPayload: { toolEndpoint: { method: 'POST', endpointUrl: tool.endpoint, body: payload } },
+      responsePayload: { error: error instanceof Error ? error.message : 'Tool endpoint request failed' },
+      latencyMs: Date.now() - started,
+      status: 'error',
+      type: 'error',
+    })
+  }
+}
+
+async function callEnterpriseToolWithRetry(tool: EnterpriseTool, incident: Incident) {
+  let lastLog: ApiLogEntry | undefined
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    lastLog = await callEnterpriseTool(tool, incident)
+    if (lastLog.status === 'ok' && lastLog.tokenCount && lastLog.tokenCount > 0) return lastLog
+    await wait(1500 + attempt * 1500)
+  }
+  return lastLog as ApiLogEntry
+}
+
+async function runEnterpriseToolFanout(
+  incident: Incident,
+  appendLogs: (logs: ApiLogEntry[]) => void,
+) {
+  for (const tool of toolEndpoints) {
+    const log = await callEnterpriseToolWithRetry(tool, incident)
+    appendLogs([log])
+    await wait(650)
   }
 }
 
@@ -760,6 +898,7 @@ function App() {
   const [run, setRun] = useState<RunState>(initialRun)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string>()
+  const fanoutRunRef = useRef(0)
 
   useEffect(() => {
     fetch('/api/health')
@@ -795,10 +934,21 @@ function App() {
       const data = item.data as { message: string }
       setError(data.message)
     }
+    if (item.event === 'incident') {
+      const incident = item.data as Incident
+      const fanoutId = fanoutRunRef.current
+      void runEnterpriseToolFanout(incident, (logs) => {
+        setRun((current) => {
+          if (fanoutId !== fanoutRunRef.current) return current
+          return { ...current, apiLogs: [...current.apiLogs, ...logs] }
+        })
+      })
+    }
     setRun((current) => applyRunEvent(current, item))
   }
 
   const startRun = async () => {
+    fanoutRunRef.current += 1
     setRunning(true)
     setError(undefined)
     setRun(initialRun)

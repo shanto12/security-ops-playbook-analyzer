@@ -211,10 +211,6 @@ function fireworksKey() {
   return envValue('FIREWORKS_API_KEY')
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
 async function callFireworksJson({
   node,
   prompt,
@@ -578,153 +574,6 @@ async function callGlmJson({
   return { result, log }
 }
 
-function buildToolRequest(tool: (typeof toolEndpoints)[number], incident: any, state: any) {
-  return {
-    incident,
-    state,
-    action: tool.name === 'Firewall' ? 'preview_block_rule' : 'investigate',
-    requestTimestamp: new Date().toISOString(),
-  }
-}
-
-function toolSystemPrompt(tool: (typeof toolEndpoints)[number]) {
-  return (
-    `You are ${tool.name}, a corporate security tool API used during SOC incident response. ` +
-    'Return compact valid JSON only. Do not use markdown. Include the requested indicators and incident ID in the response. ' +
-    'Make the response realistic, tool-specific, and different on every run.'
-  )
-}
-
-function toolUserPrompt(tool: (typeof toolEndpoints)[number], incident: any, state: any) {
-  return JSON.stringify({
-    tool: tool.name,
-    logicalEndpoint: tool.endpoint,
-    callerAgent: tool.agent,
-    task: 'Generate a realistic enterprise tool API response for this incident investigation.',
-    request: buildToolRequest(tool, incident, state),
-    responseContract: {
-      verdict: 'short security verdict',
-      evidence: 'one sentence with IOC and affected host/user',
-      confidence: 'number from 0 to 1',
-      records: '2-4 concise tool-specific findings',
-      recommendedNextStep: 'one sentence',
-    },
-    diversitySeed: `${incident?.incidentId ?? 'incident'}-${tool.name}-${Date.now()}-${crypto.randomUUID()}`,
-  })
-}
-
-async function callToolLlm(
-  tool: (typeof toolEndpoints)[number],
-  incident: any,
-  state: any,
-): Promise<{ tool: (typeof toolEndpoints)[number]; body: any; log: ApiLogEntry }> {
-  const provider = fireworksKey() ? 'fireworks' : 'z.ai'
-  const apiKey = provider === 'fireworks' ? fireworksKey() : requiredKey()
-  const model =
-    provider === 'fireworks'
-      ? envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
-      : envValue('GLM_TOOL_MODEL') || 'glm-5-turbo'
-  const baseUrl =
-    provider === 'fireworks'
-      ? envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
-      : envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
-  const endpointPath = '/chat/completions'
-  const requestBody = {
-    model,
-    ...(provider === 'fireworks' ? { reasoning_effort: 'none' } : { thinking: { type: 'disabled' } }),
-    temperature: 0.76,
-    max_tokens: 180,
-    stream: false,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: toolSystemPrompt(tool) },
-      { role: 'user', content: toolUserPrompt(tool, incident, state) },
-    ],
-  }
-  const started = Date.now()
-  let response: Response
-  try {
-    response = await fetch(`${baseUrl}${endpointPath}`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-        ...(provider === 'z.ai' ? { 'accept-language': 'en-US,en' } : {}),
-      },
-      body: JSON.stringify(requestBody),
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : `${tool.name} model request failed before response`
-    const log = makeLlmAuditLog({
-      callerAgent: tool.agent,
-      provider,
-      toolName: tool.name,
-      model,
-      baseUrl,
-      endpointPath,
-      requestBody,
-      rawResponse: null,
-      latencyMs: Date.now() - started,
-      ok: false,
-      errorMessage: message,
-      logType: 'tool',
-    })
-    return { tool, body: { tool: tool.name, endpoint: tool.endpoint, error: message }, log }
-  }
-
-  const text = await response.text()
-  const parsed = parseProviderResponse(text) as any
-  const content = parsed?.choices?.[0]?.message?.content ?? '{}'
-  let result: unknown
-  let ok = response.ok
-  let errorMessage: string | undefined
-  if (!response.ok) {
-    errorMessage = `${tool.name} provider ${response.status}: ${text.slice(0, 240)}`
-    result = { error: errorMessage }
-    ok = false
-  } else {
-    try {
-      result = extractJson(content)
-    } catch (error) {
-      errorMessage = error instanceof Error ? error.message : `${tool.name} response parse failed`
-      result = { error: errorMessage, rawContent: content }
-      ok = false
-    }
-  }
-
-  const body = {
-    tool: tool.name,
-    endpoint: tool.endpoint,
-    generatedAt: new Date().toISOString(),
-    incidentId: incident?.incidentId,
-    provider,
-    model,
-    usage: parsed?.usage,
-    data: result,
-  }
-  const log = makeLlmAuditLog({
-    callerAgent: tool.agent,
-    provider,
-    toolName: tool.name,
-    model,
-    baseUrl,
-    endpointPath,
-    requestBody,
-    rawResponse: parsed,
-    rawContent: content,
-    parsedOutput: result,
-    normalizedOutput: body,
-    usage: parsed?.usage,
-    latencyMs: Date.now() - started,
-    statusCode: response.status,
-    statusText: response.statusText,
-    ok,
-    errorMessage,
-    logType: 'tool',
-  })
-  return { tool, body, log }
-}
-
 function normalizeRunPlan(raw: any) {
   const compactIncident = raw?.incident ?? raw?.i ?? {}
   const severityOptions = ['Critical', 'High', 'Medium', 'Low']
@@ -907,34 +756,26 @@ export default async (req: Request) => {
 
         timeline(
           'Parallel superstep started',
-          'Enrichment, identity, endpoint, log, cloud, and ticketing tools are calling real LLM-backed APIs in a Send() fan-out.',
+          'Enrichment, identity, endpoint, log, cloud, and ticketing tools are ready for hosted Send() fan-out.',
           'info',
           send,
         )
         for (const node of ['enrichment', 'identity', 'endpoint', 'log_analysis', 'threat_intel']) {
           send('node_start', { node, timestamp: new Date().toISOString() })
         }
-        const toolResults: Awaited<ReturnType<typeof callToolLlm>>[] = []
-        for (let index = 0; index < toolEndpoints.length; index += 2) {
-          const batch = toolEndpoints.slice(index, index + 2)
-          const batchResults = await Promise.all(
-            batch.map(async (tool) => {
-              let result = await callToolLlm(tool, incident, state)
-              if (result.log.status !== 'ok' || !result.log.tokenCount) {
-                await sleep(900)
-                result = await callToolLlm(tool, incident, state)
-              }
-              send('api_call', result.log)
-              return result
-            }),
-          )
-          toolResults.push(...batchResults)
-        }
+        send('tool_fanout_required', {
+          incident,
+          state,
+          tools: toolEndpoints,
+          concurrency: 1,
+          evidenceRequirement: 'Each hosted tool endpoint must return llmAudit with prompt messages, raw response, parsed response, and nonzero token usage.',
+        })
         checkpoint(
           'parallel_superstep',
           {
-            toolCount: toolResults.length,
-            successfulTools: toolResults.filter((item) => item.log.status === 'ok').map((item) => item.tool.name),
+            toolCount: toolEndpoints.length,
+            toolEndpoints: toolEndpoints.map((tool) => tool.endpoint),
+            executionMode: 'hosted_tool_endpoint_fanout',
           },
           send,
         )
@@ -963,7 +804,7 @@ export default async (req: Request) => {
             threadId,
             supervisor: supervisorResult,
             triage: triageResult,
-            toolResults: toolResults.map((item) => ({ tool: item.tool.name, response: (item.body as any)?.data ?? item.body })),
+            toolEndpoints,
           },
         }
         checkpoint('containment_interrupt', { approval }, send)

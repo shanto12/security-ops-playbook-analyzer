@@ -186,7 +186,7 @@ async function callGlm(spec: ToolSpec, payload: any) {
     model,
     thinking: { type: 'disabled' },
     temperature: 0.88,
-    max_tokens: 380,
+    max_tokens: 260,
     stream: false,
     response_format: { type: 'json_object' },
     messages: [

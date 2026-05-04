@@ -103,6 +103,7 @@ export interface ApiLogEntry {
   prompt?: unknown
   messages?: LlmMessage[]
   statusCode?: number
+  statusText?: string
   latencyMs: number
   tokenCount?: number
   status: ApiLogStatus
@@ -165,6 +166,16 @@ export type RunEvent =
   | { event: 'api_call'; data: ApiLogEntry }
   | { event: 'delta'; data: { node: string; content: string } }
   | { event: 'incident'; data: Incident }
+  | {
+      event: 'tool_fanout_required'
+      data: {
+        incident: Incident
+        state: Record<string, unknown>
+        tools: Array<{ name: string; endpoint: string; agent: string }>
+        concurrency: number
+        evidenceRequirement: string
+      }
+    }
   | { event: 'approval_required'; data: ApprovalRequest }
   | { event: 'report'; data: FinalReport }
   | { event: 'complete'; data: { completedAt: string; mttrMs: number } }

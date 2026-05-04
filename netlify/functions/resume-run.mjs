@@ -310,7 +310,6 @@ data: ${JSON.stringify(data)}
             mfaResetRecommended: true
           }));
         }
-        for (const log of logs) send("api_call", log);
         checkpoint("containment_resume", { decision, containmentLogs: logs.map((log) => log.responsePayload) }, send);
         send("node_complete", { node: "containment", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: Date.now() - startMs });
         for (const node of ["ticketing", "notification", "reporting"]) {
@@ -339,7 +338,6 @@ data: ${JSON.stringify(data)}
             affectedUser: incident?.affectedUser
           })
         ];
-        ticketLogs.forEach((log) => send("api_call", log));
         send("node_complete", { node: "ticketing", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: 0 });
         send("node_complete", { node: "notification", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: 0 });
         const fallbackReport = {

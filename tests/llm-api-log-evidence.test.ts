@@ -3,6 +3,7 @@ import agentRun from '../netlify/functions-src/agent-run.mts'
 import replayRun from '../netlify/functions-src/replay-run.mts'
 import resumeRun from '../netlify/functions-src/resume-run.mts'
 import toolGateway from '../netlify/functions-src/tool-gateway.mts'
+import { toolEndpoints } from '../src/data/graph'
 import { consumeSse } from '../src/lib/sse'
 import type { SseEvent } from '../src/lib/types'
 
@@ -99,15 +100,6 @@ function expectFullLlmEvidence(log: LlmLog) {
   expect.soft(containsPromptOrMessages(log.requestPayload)).toBe(true)
 }
 
-function expectToolModelEvidence(log: LlmLog) {
-  expect.soft(log.type).toBe('tool')
-  expect.soft(log.status).toBe('ok')
-  expect.soft(log.responsePayload).toEqual(expect.any(Object))
-  expect.soft(log.tokenCount).toEqual(expect.any(Number))
-  expect.soft(log.tokenCount).toBeGreaterThan(0)
-  expect.soft(containsPromptOrMessages(log.requestPayload)).toBe(true)
-}
-
 async function collectSse(response: Response) {
   const events: SseEvent[] = []
   await consumeSse(response, (event) => events.push(event))
@@ -137,9 +129,10 @@ describe('LLM API log evidence', () => {
       .map((event) => event.data as LlmLog)
       .filter((log) => log.type === 'tool')
 
+    const fanout = events.find((event) => event.event === 'tool_fanout_required')
     expect.soft(llmLogs).toHaveLength(1)
-    expect.soft(toolLogs).toHaveLength(10)
-    toolLogs.forEach(expectToolModelEvidence)
+    expect.soft(toolLogs).toHaveLength(0)
+    expect.soft((fanout?.data as { tools?: unknown[] } | undefined)?.tools).toHaveLength(10)
     expect.soft(events.some((event) => event.event === 'approval_required')).toBe(true)
     expect.soft(events.at(-1)?.event).toBe('done')
     expectFullLlmEvidence(llmLogs[0])
@@ -233,26 +226,29 @@ describe('LLM API log evidence', () => {
     expectFullLlmEvidence(llmLogs[0])
   })
 
-  it('returns full LLM audit evidence from direct enterprise tool endpoints', async () => {
+  it('returns full LLM audit evidence from all direct enterprise tool endpoints', async () => {
     vi.stubEnv('GLM_API_KEY', 'test-key')
     vi.stubGlobal('fetch', vi.fn(async () => providerResponse({ issueKey: 'SEC-1234', status: 'Created' }, 222)))
 
-    const response = await toolGateway(
-      new Request('https://example.test/api/jira/issue', {
-        method: 'POST',
-        body: JSON.stringify({ incidentId: 'SOC-TEST-001', indicator: 'stage.example' }),
-      }),
-    )
-    const body = await response.json()
+    for (const tool of toolEndpoints) {
+      const response = await toolGateway(
+        new Request(`https://example.test${tool.endpoint}`, {
+          method: 'POST',
+          body: JSON.stringify({ incidentId: 'SOC-TEST-001', indicator: 'stage.example' }),
+        }),
+      )
+      const body = await response.json()
 
-    expect.soft(response.status).toBe(200)
-    expect.soft(body.llmAudit).toEqual(expect.any(Object))
-    expectFullLlmEvidence({
-      type: 'llm',
-      status: body.llmAudit.status,
-      requestPayload: body.llmAudit.requestPayload,
-      responsePayload: body.llmAudit.parsedResponsePayload,
-      tokenCount: body.llmAudit.tokenCount,
-    })
+      expect.soft(response.status).toBe(200)
+      expect.soft(body.tool).toBe(tool.name)
+      expect.soft(body.llmAudit).toEqual(expect.any(Object))
+      expectFullLlmEvidence({
+        type: 'llm',
+        status: body.llmAudit.status,
+        requestPayload: body.llmAudit.requestPayload,
+        responsePayload: body.llmAudit.parsedResponsePayload,
+        tokenCount: body.llmAudit.tokenCount,
+      })
+    }
   })
 })

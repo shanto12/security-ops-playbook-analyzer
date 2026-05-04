@@ -349,7 +349,6 @@ export default async (req: Request) => {
             mfaResetRecommended: true,
           }))
         }
-        for (const log of logs) send('api_call', log)
         checkpoint('containment_resume', { decision, containmentLogs: logs.map((log) => log.responsePayload) }, send)
         send('node_complete', { node: 'containment', timestamp: new Date().toISOString(), durationMs: Date.now() - startMs })
 
@@ -379,7 +378,6 @@ export default async (req: Request) => {
             affectedUser: incident?.affectedUser,
           }),
         ]
-        ticketLogs.forEach((log) => send('api_call', log))
         send('node_complete', { node: 'ticketing', timestamp: new Date().toISOString(), durationMs: 0 })
         send('node_complete', { node: 'notification', timestamp: new Date().toISOString(), durationMs: 0 })
 

@@ -3,6 +3,21 @@ import { mkdir, writeFile } from 'node:fs/promises'
 const baseUrl = process.argv[2] ?? 'https://security-ops-playbook-analyzer.netlify.app'
 const outputPath = process.argv[3] ?? `docs/llm-api-call-proof-${new Date().toISOString().slice(0, 10)}.md`
 
+const toolEndpoints = [
+  { name: 'VirusTotal', endpoint: '/api/virustotal/lookup', agent: 'Enrichment Agent' },
+  { name: 'AbuseIPDB', endpoint: '/api/abuseipdb/check', agent: 'Enrichment Agent' },
+  { name: 'Active Directory', endpoint: '/api/activedirectory/user', agent: 'Identity Investigation Agent' },
+  { name: 'Okta', endpoint: '/api/okta/user-risk', agent: 'Identity Investigation Agent' },
+  { name: 'EDR', endpoint: '/api/edr/endpoint', agent: 'Endpoint Investigation Agent' },
+  { name: 'SIEM', endpoint: '/api/siem/search', agent: 'Log Analysis Agent' },
+  { name: 'Microsoft 365 Audit', endpoint: '/api/m365/audit', agent: 'Log Analysis Agent' },
+  { name: 'AWS CloudTrail', endpoint: '/api/cloudtrail/search', agent: 'Log Analysis Agent' },
+  { name: 'ServiceNow', endpoint: '/api/servicenow/ticket', agent: 'Ticketing Agent' },
+  { name: 'Jira', endpoint: '/api/jira/issue', agent: 'Ticketing Agent' },
+]
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 function hasMessages(value) {
   if (!value || typeof value !== 'object') return false
   if (Array.isArray(value)) return value.some(hasMessages)
@@ -89,6 +104,32 @@ async function collectSse(path, body, timeoutMs = 90000) {
   }
 }
 
+async function fetchToolEvidence(tool, incident) {
+  let lastBody
+  let lastStatus = 0
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const response = await fetch(`${baseUrl}${tool.endpoint}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        incident,
+        incidentId: incident?.incidentId,
+        tool: tool.name,
+        callerAgent: tool.agent,
+        source: 'live-proof-script',
+        requestTimestamp: new Date().toISOString(),
+      }),
+    })
+    lastStatus = response.status
+    lastBody = await response.json().catch(() => ({ error: 'non-json response' }))
+    if (response.ok && lastBody?.llmAudit?.status === 'ok' && lastBody?.llmAudit?.tokenCount > 0) {
+      return lastBody
+    }
+    await wait(1800 + attempt * 2200)
+  }
+  throw new Error(`${tool.name} direct endpoint failed after retries: ${lastStatus} ${JSON.stringify(lastBody)}`)
+}
+
 function mdTable(rows) {
   const header = '| Call path | Type | Provider | Model | Status | Tokens | Latency | Messages | Response evidence |'
   const separator = '|---|---:|---|---|---|---:|---:|---|---|'
@@ -108,28 +149,16 @@ if (!healthResponse.ok || health.status !== 'ok') {
   throw new Error(`Health check failed: ${healthResponse.status} ${JSON.stringify(health)}`)
 }
 
-const toolResponse = await fetch(`${baseUrl}/api/jira/issue`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({
-    incidentId: `LIVE-PROOF-${Date.now()}`,
-    indicator: 'proof-check.example',
-    incident: {
-      incidentId: 'LIVE-PROOF',
-      iocs: { domain: 'proof-check.example', ip: '203.0.113.77' },
-    },
-  }),
-})
-const toolBody = await toolResponse.json()
-if (!toolResponse.ok) throw new Error(`Direct tool endpoint failed: ${toolResponse.status} ${JSON.stringify(toolBody)}`)
-
 const agentRun = await collectSse('/api/agent-run', { source: 'llm-proof-script' })
 const agentLogs = agentRun.events.filter((item) => item.event === 'api_call').map((item) => item.data)
 const supervisorLlm = agentLogs.find((log) => log.type === 'llm')
-const toolLogs = agentLogs.filter((log) => log.type === 'tool')
 const approval = agentRun.events.find((item) => item.event === 'approval_required')?.data
 if (!approval) throw new Error(`agent-run did not produce approval_required: ${JSON.stringify(agentRun.counts)}`)
-if (toolLogs.length < 10) throw new Error(`Expected at least 10 real tool model calls, got ${toolLogs.length}`)
+
+const directToolBodies = []
+for (const tool of toolEndpoints) {
+  directToolBodies.push({ tool, body: await fetchToolEvidence(tool, approval.incident) })
+}
 
 const resumeRun = await collectSse('/api/resume-run', {
   decision: 'approve',
@@ -153,9 +182,11 @@ const replayLlm = replayRun.events
   .find((log) => log.type === 'llm')
 
 const rows = [
-  { path: '/api/jira/issue', ...assertLogEvidence('/api/jira/issue llmAudit', toolBody.llmAudit) },
   { path: '/api/agent-run supervisor', ...assertLogEvidence('/api/agent-run supervisor', supervisorLlm) },
-  ...toolLogs.map((log) => ({ path: `/api/agent-run ${log.toolName}`, ...assertLogEvidence(`/api/agent-run ${log.toolName}`, log) })),
+  ...directToolBodies.map(({ tool, body }) => ({
+    path: tool.endpoint,
+    ...assertLogEvidence(`${tool.endpoint} llmAudit`, body.llmAudit),
+  })),
   { path: '/api/resume-run report', ...assertLogEvidence('/api/resume-run report', reportLlm) },
   { path: '/api/replay-run', ...assertLogEvidence('/api/replay-run', replayLlm) },
 ]
