@@ -25,7 +25,7 @@ The public demo is optimized for Netlify:
 
 ## Hosted Execution Note
 
-The production Netlify SSE path uses a GLM-generated hosted superstep for the first ten enterprise tool results so the approval interrupt is reached reliably inside Netlify's synchronous function window. The individual tool endpoints remain independently callable GLM-backed HTTP routes for live endpoint demonstrations.
+The production Netlify SSE path uses a GLM-5-Turbo hosted superstep for the first ten enterprise tool results so the approval interrupt is reached reliably inside Netlify's synchronous function window. The individual tool endpoints remain independently callable GLM-backed HTTP routes for live endpoint demonstrations.
 
 ## Netlify vs FastAPI Note
 

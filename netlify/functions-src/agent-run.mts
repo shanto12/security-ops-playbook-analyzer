@@ -61,6 +61,7 @@ async function callGlmJson({
   maxTokens = 900,
   send,
   streamDeltas = false,
+  modelName,
 }: {
   node: string
   prompt: unknown
@@ -68,9 +69,10 @@ async function callGlmJson({
   maxTokens?: number
   send: (event: string, data: unknown) => void
   streamDeltas?: boolean
+  modelName?: string
 }) {
   const apiKey = requiredKey()
-  const model = envValue('GLM_MODEL') || 'glm-5.1'
+  const model = modelName || envValue('GLM_MODEL') || 'glm-5.1'
   const baseUrl = envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
   const body = {
     model,
@@ -196,7 +198,7 @@ function buildHostedToolResult(
     endpoint: tool.endpoint,
     generatedAt: new Date().toISOString(),
     incidentId: incident?.incidentId,
-    model: envValue('GLM_MODEL') || 'glm-5.1',
+    model: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
     mode: 'hosted-batched-superstep',
     data: generated?.responsePayload ?? generated?.data ?? generated,
   }
@@ -325,14 +327,15 @@ export default async (req: Request) => {
             rules: [
               'Every incident field must vary independently from run to run.',
               'Every tool response must include at least one incident IOC or affected entity.',
-              'Use concise but realistic enterprise schemas for each tool.',
+              'Use very compact enterprise schemas: each responsePayload should have verdict, confidence, and exactly two evidence strings.',
               'Make the supervisor, triage, tool responses, and containment recommendation mutually consistent.',
             ],
           },
           temperature: 0.9,
-          maxTokens: 2600,
+          maxTokens: 1250,
           send,
           streamDeltas: true,
+          modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
         })
         const runPlan = orchestratedRun.result
         const incident = runPlan.incident
