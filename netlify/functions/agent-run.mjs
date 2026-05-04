@@ -218,63 +218,12 @@ data: ${JSON.stringify(data)}
         send("start", { runId, threadId, startedAt });
         timeline("Run started", "Supervisor accepted a new one-click incident investigation.", "info", send);
         send("node_start", { node: "incident_generator", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+        const compactTools = toolEndpoints.map((tool) => `${tool.name}:${tool.endpoint}`).join("; ");
         const orchestratedRun = await callGlmJson({
           node: "Supervisor Graph Orchestrator",
-          prompt: {
-            task: "Generate a complete one-click SOC incident investigation run for a hosted LangGraph demo. Return compact JSON only.",
-            diversitySeed: `${Date.now()}-${crypto.randomUUID()}`,
-            incidentSchema: {
-              incidentId: "SOC-YYYYMMDD-random",
-              timestamp: "ISO-8601",
-              severity: "Critical | High | Medium | Low",
-              priorityScore: "1-10 integer",
-              incidentType: "phishing | ransomware | lateral movement | data exfiltration | privilege escalation | C2 beaconing | insider threat | brute force | supply chain compromise | zero-day exploit",
-              affectedUser: "realistic corporate user",
-              affectedHost: "hostname",
-              affectedIp: "RFC1918 or public IP as appropriate",
-              affectedDepartment: "department",
-              mitreTactic: "MITRE ATT&CK tactic",
-              mitreTechnique: "MITRE technique ID and name",
-              initialAlertSource: "SIEM | EDR | NDR | UEBA",
-              iocs: { ip: "indicator IP", hash: "sha256", domain: "domain", url: "url" },
-              rawLogSnippet: "3-6 lines of plausible log evidence"
-            },
-            toolContracts: toolEndpoints.map((tool) => ({
-              name: tool.name,
-              endpoint: tool.endpoint,
-              agent: tool.agent
-            })),
-            returnShape: {
-              incident: "full incident object",
-              supervisor: {
-                route: "more_investigation | containment | escalation",
-                rationale: "short explanation",
-                selectedAgents: ["agent names"],
-                confidence: "0-1 number"
-              },
-              triage: {
-                classification: "string",
-                dedupeStatus: "new | duplicate | related",
-                riskScore: "1-100",
-                keyFindings: ["strings"]
-              },
-              toolResults: "exactly one compact object per toolContract with name, endpoint, responsePayload, confidence, and tokenCount",
-              containment: {
-                actionName: "isolate_host | disable_user | block_ip_or_domain",
-                target: "host/user/ip/domain",
-                toolArguments: {},
-                riskJustification: "why this action is appropriate and what it could break"
-              }
-            },
-            rules: [
-              "Every incident field must vary independently from run to run.",
-              "Every tool response must include at least one incident IOC or affected entity.",
-              "Use very compact enterprise schemas: each responsePayload should have verdict, confidence, and exactly two evidence strings.",
-              "Make the supervisor, triage, tool responses, and containment recommendation mutually consistent."
-            ]
-          },
+          prompt: `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Keys: incident, supervisor, triage, toolResults, containment. incident must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet. supervisor={route,rationale,selectedAgents,confidence}. triage={classification,dedupeStatus,riskScore,keyFindings}. toolResults must have exactly 10 items in this order: ${compactTools}. Each item={name,endpoint,responsePayload:{verdict,evidence},confidence}. containment={actionName,target,toolArguments,riskJustification}. Keep evidence short and include incident IOC/entity.`,
           temperature: 0.9,
-          maxTokens: 1e3,
+          maxTokens: 700,
           send,
           streamDeltas: false,
           modelName: envValue("GLM_TOOL_MODEL") || "glm-5-turbo"
