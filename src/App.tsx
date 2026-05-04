@@ -457,6 +457,9 @@ function Report({
   report?: FinalReport
   run: RunState
 }) {
+  const mitreMapping = safeList(report?.mitreMapping)
+  const recommendations = safeList(report?.recommendations)
+
   return (
     <section className="panel report">
       <div className="panel__title rowBetween">
@@ -484,9 +487,9 @@ function Report({
           <h3>Root Cause</h3>
           <p>{report.rootCause}</p>
           <h3>MITRE Mapping</h3>
-          <ul>{report.mitreMapping.map((item) => <li key={item}>{item}</li>)}</ul>
+          <ul>{mitreMapping.map((item) => <li key={item}>{item}</li>)}</ul>
           <h3>Recommendations</h3>
-          <ul>{report.recommendations.map((item) => <li key={item}>{item}</li>)}</ul>
+          <ul>{recommendations.map((item) => <li key={item}>{item}</li>)}</ul>
         </div>
       )}
     </section>
@@ -557,6 +560,10 @@ function App() {
   }, [])
 
   const toolCount = useMemo(() => run.apiLogs.filter((log) => log.type === 'tool').length, [run.apiLogs])
+  const toolMetric = useMemo(() => {
+    const denominator = Math.max(toolEndpoints.length, toolCount)
+    return `${toolCount}/${denominator}`
+  }, [toolCount])
   const tokenCount = useMemo(
     () => run.apiLogs.reduce((sum, log) => sum + (log.tokenCount ?? 0), 0),
     [run.apiLogs],
@@ -667,7 +674,7 @@ function App() {
         </div>
         <div className="metricsRow">
           <Metric label="Checkpoints" value={`${run.checkpoints.length}`} tone="cool" />
-          <Metric label="Tool calls" value={`${toolCount}/${toolEndpoints.length}`} />
+          <Metric label="Tool calls" value={toolMetric} />
           <Metric label="Tokens" value={`${tokenCount}`} tone="ok" />
           <Metric label="MTTR" value={run.mttrMs ? duration(run.mttrMs) : '--'} tone="hot" />
         </div>
@@ -699,6 +706,12 @@ function App() {
       {run.approval ? <ApprovalCard request={run.approval} onDecision={decide} /> : null}
     </main>
   )
+}
+
+function safeList(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item))
+  if (typeof value === 'string' && value.trim()) return [value]
+  return []
 }
 
 export default App

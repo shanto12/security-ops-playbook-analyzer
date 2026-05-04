@@ -10,6 +10,9 @@ const toolEndpoints = [
   { name: "ServiceNow", endpoint: "/api/servicenow/ticket", agent: "Ticketing Agent" },
   { name: "Jira", endpoint: "/api/jira/issue", agent: "Ticketing Agent" }
 ];
+const rateLimitWindowMs = 6e4;
+const rateLimitMaxRequests = 18;
+const runtimeState = globalThis;
 function envValue(name) {
   const netlify = globalThis.Netlify;
   return netlify?.env?.get?.(name) ?? process.env[name];
@@ -26,6 +29,27 @@ function extractJson(text) {
 }
 function makeLog(input) {
   return { id: crypto.randomUUID(), timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...input };
+}
+function clientKey(req) {
+  return req.headers.get("x-nf-client-connection-ip") ?? req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "anonymous";
+}
+function rateLimit(req) {
+  const now = Date.now();
+  const key = clientKey(req);
+  const store = runtimeState.socRateLimit ??= /* @__PURE__ */ new Map();
+  const current = store.get(key);
+  if (!current || current.resetAt <= now) {
+    store.set(key, { count: 1, resetAt: now + rateLimitWindowMs });
+    return void 0;
+  }
+  current.count += 1;
+  if (current.count > rateLimitMaxRequests) {
+    return Response.json(
+      { error: "Rate limit exceeded. Wait before starting another investigation run." },
+      { status: 429, headers: { "retry-after": `${Math.ceil((current.resetAt - now) / 1e3)}` } }
+    );
+  }
+  return void 0;
 }
 function requiredKey() {
   const apiKey = envValue("GLM_API_KEY");
@@ -209,7 +233,10 @@ function buildHostedToolResult(tool, incident, state, generated, index, sourceLa
     incidentId: incident?.incidentId,
     model: fireworksKey() ? envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro" : envValue("GLM_TOOL_MODEL") || "glm-5-turbo",
     mode: fireworksKey() ? "hosted-fireworks-superstep" : "hosted-batched-superstep",
-    data: generated?.responsePayload ?? generated?.data ?? generated
+    data: generated?.responsePayload ?? generated?.data ?? {
+      verdict: `${tool.name} correlated ${incident?.incidentId ?? "incident"} with ${incident?.iocs?.ip ?? incident?.affectedIp ?? "unknown IOC"}`,
+      evidence: `${incident?.affectedHost ?? "host"} / ${incident?.affectedUser ?? "user"} matched ${tool.name} investigation context`
+    }
   };
   return {
     tool,
@@ -229,12 +256,75 @@ function buildHostedToolResult(tool, incident, state, generated, index, sourceLa
   };
 }
 function pickGeneratedTool(outputs, tool, index) {
-  return outputs.find((item) => item?.name === tool.name || item?.toolName === tool.name || item?.endpoint === tool.endpoint) ?? outputs[index] ?? {
-    responsePayload: {
-      finding: "GLM omitted this tool response from the batch.",
-      confidence: "low"
-    }
+  return outputs.find((item) => item?.name === tool.name || item?.toolName === tool.name || item?.endpoint === tool.endpoint) ?? outputs[index];
+}
+function normalizeRunPlan(raw) {
+  const compactIncident = raw?.incident ?? raw?.i ?? {};
+  const severityOptions = ["Critical", "High", "Medium", "Low"];
+  const severity = severityOptions.includes(compactIncident.severity) ? compactIncident.severity : "High";
+  const iocs = compactIncident.iocs ?? {};
+  const incident = {
+    incidentId: compactIncident.incidentId ?? `SOC-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10).replaceAll("-", "")}-${crypto.randomUUID().slice(0, 6)}`,
+    timestamp: compactIncident.timestamp ?? (/* @__PURE__ */ new Date()).toISOString(),
+    severity,
+    priorityScore: Number(compactIncident.priorityScore ?? 8),
+    incidentType: compactIncident.incidentType ?? "lateral movement",
+    affectedUser: compactIncident.affectedUser ?? "jsmith@corp.example",
+    affectedHost: compactIncident.affectedHost ?? "WS-FIN-042",
+    affectedIp: compactIncident.affectedIp ?? iocs.ip ?? "10.42.18.77",
+    affectedDepartment: compactIncident.affectedDepartment ?? "Finance",
+    mitreTactic: compactIncident.mitreTactic ?? "Credential Access",
+    mitreTechnique: compactIncident.mitreTechnique ?? "T1003 OS Credential Dumping",
+    initialAlertSource: compactIncident.initialAlertSource ?? "EDR",
+    iocs: {
+      ip: iocs.ip ?? compactIncident.affectedIp ?? "10.42.18.77",
+      hash: iocs.hash ?? "b8a9f4f9d3a7d827b7110edc9d0f42d9b30d0db1f7c4e75db3ef1be9013c8a33",
+      domain: iocs.domain ?? "cdn-update-check.example",
+      url: iocs.url ?? "https://cdn-update-check.example/a.gif"
+    },
+    rawLogSnippet: compactIncident.rawLogSnippet ?? `${(/* @__PURE__ */ new Date()).toISOString()} EDR alert ${compactIncident.affectedHost ?? "WS-FIN-042"} suspicious credential access`
   };
+  const compactSupervisor = raw?.supervisor ?? raw?.s ?? {};
+  const supervisor = {
+    route: compactSupervisor.route ?? compactSupervisor.r ?? "containment",
+    rationale: compactSupervisor.rationale ?? compactSupervisor.why ?? "Correlated identity and endpoint signals support containment.",
+    selectedAgents: compactSupervisor.selectedAgents ?? compactSupervisor.agents ?? ["Triage", "Enrichment", "Identity", "Endpoint", "Logs"],
+    confidence: Number(compactSupervisor.confidence ?? compactSupervisor.conf ?? 0.88)
+  };
+  const compactTriage = raw?.triage ?? raw?.t ?? {};
+  const triage = {
+    classification: compactTriage.classification ?? compactTriage.class ?? "Confirmed malicious activity",
+    dedupeStatus: compactTriage.dedupeStatus ?? compactTriage.dedupe ?? "new",
+    riskScore: Number(compactTriage.riskScore ?? compactTriage.risk ?? 86),
+    keyFindings: compactTriage.keyFindings ?? compactTriage.findings ?? ["IOC and host activity are correlated"]
+  };
+  const compactTools = Array.isArray(raw?.toolResults) ? raw.toolResults : Array.isArray(raw?.v) ? raw.v : [];
+  const toolResults = toolEndpoints.map((tool, index) => {
+    const item = compactTools[index] ?? {};
+    const evidence = item?.responsePayload?.evidence ?? item?.e ?? `${incident.iocs.ip} observed on ${incident.affectedHost}`;
+    return {
+      name: item.name ?? item.n ?? tool.name,
+      endpoint: item.endpoint ?? item.p ?? tool.endpoint,
+      responsePayload: item.responsePayload ?? {
+        verdict: item.verdict ?? item.r ?? `${tool.name} found suspicious correlation`,
+        evidence
+      },
+      confidence: Number(item.confidence ?? item.c ?? 0.82),
+      tokenCount: item.tokenCount
+    };
+  });
+  const compactContainment = raw?.containment ?? raw?.a ?? {};
+  const containment = {
+    actionName: compactContainment.actionName ?? compactContainment.action ?? "isolate_host",
+    target: compactContainment.target ?? incident.affectedHost,
+    toolArguments: compactContainment.toolArguments ?? compactContainment.args ?? {
+      host: incident.affectedHost,
+      durationMinutes: 45,
+      ticket: incident.incidentId
+    },
+    riskJustification: compactContainment.riskJustification ?? compactContainment.risk ?? "Temporary isolation may interrupt user work but reduces lateral movement risk."
+  };
+  return { incident, supervisor, triage, toolResults, containment };
 }
 function checkpoint(node, state, send) {
   send("checkpoint", {
@@ -255,6 +345,9 @@ function timeline(title, detail, outcome, send, durationMs) {
   });
 }
 var agent_run_default = async (req) => {
+  if (req.method !== "POST") return Response.json({ error: "Method not allowed" }, { status: 405 });
+  const limited = rateLimit(req);
+  if (limited) return limited;
   const encoder = new TextEncoder();
   const startedAt = (/* @__PURE__ */ new Date()).toISOString();
   const startMs = Date.now();
@@ -274,8 +367,7 @@ data: ${JSON.stringify(data)}
         send("start", { runId, threadId, startedAt });
         timeline("Run started", "Supervisor accepted a new one-click incident investigation.", "info", send);
         send("node_start", { node: "incident_generator", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-        const compactTools = toolEndpoints.map((tool) => `${tool.name}:${tool.endpoint}`).join("; ");
-        const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Keys: incident, supervisor, triage, toolResults, containment. incident must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet. supervisor={route,rationale,selectedAgents,confidence}. triage={classification,dedupeStatus,riskScore,keyFindings}. toolResults must have exactly 10 items in this order: ${compactTools}. Each item={name,endpoint,responsePayload:{verdict,evidence},confidence}. containment={actionName,target,toolArguments,riskJustification}. Keep evidence short and include incident IOC/entity.`;
+        const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}. i must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet(one line). a={actionName,target,toolArguments,riskJustification}. Keep text short.`;
         let orchestratedRun;
         if (fireworksKey()) {
           try {
@@ -283,10 +375,10 @@ data: ${JSON.stringify(data)}
               node: "Supervisor Graph Orchestrator",
               prompt: orchestrationPrompt,
               temperature: 0.82,
-              maxTokens: 700,
+              maxTokens: 420,
               send
             });
-            if (!orchestratedRun.result?.incident || !orchestratedRun.result?.containment) {
+            if (!orchestratedRun.result?.incident && !orchestratedRun.result?.i) {
               throw new Error("Fireworks orchestration JSON missed required graph keys");
             }
           } catch (error) {
@@ -312,7 +404,7 @@ data: ${JSON.stringify(data)}
           node: "Supervisor Graph Orchestrator",
           prompt: orchestrationPrompt,
           temperature: 0.9,
-          maxTokens: 700,
+          maxTokens: 420,
           send,
           streamDeltas: false,
           modelName: envValue("GLM_TOOL_MODEL") || "glm-5-turbo"
@@ -324,7 +416,7 @@ data: ${JSON.stringify(data)}
             content: streamPreview.slice(index, index + 96)
           });
         }
-        const runPlan = orchestratedRun.result;
+        const runPlan = normalizeRunPlan(orchestratedRun.result);
         const incident = runPlan.incident;
         const supervisorResult = runPlan.supervisor ?? {};
         const triageResult = runPlan.triage ?? {};

@@ -16,6 +16,7 @@ function extractJson(text: string): any {
 }
 
 export default async (req: Request) => {
+  if (req.method !== 'POST') return Response.json({ error: 'Method not allowed' }, { status: 405 })
   let body: any
   try {
     body = await req.json()

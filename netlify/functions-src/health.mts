@@ -15,8 +15,8 @@ export default async () => {
 
   return Response.json({
     service: 'soc-ai-agent-demo',
-    status: hasKey || hasFireworksKey ? 'ok' : 'degraded',
-    mode: hasKey || hasFireworksKey ? 'live-glm' : 'missing-key',
+    status: hasKey ? 'ok' : 'degraded',
+    mode: hasKey ? 'live-glm' : 'missing-key',
     provider: hasFireworksKey ? 'z.ai + fireworks' : 'z.ai',
     model,
     toolModel,

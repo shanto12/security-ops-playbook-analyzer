@@ -10,9 +10,9 @@ Independent concept demo. Synthetic incident data only.
 ## Live Workflow
 
 1. Click **Generate Incident**.
-2. GLM-5.1 generates a unique incident and streams graph events over SSE.
+2. The hosted graph provider generates a unique incident and streams graph events over SSE.
 3. The supervisor and triage agents route the run.
-4. Ten enterprise tool endpoints are called over HTTP in parallel waves.
+4. The hosted graph emits ten enterprise tool-call records in a Send-style superstep; each enterprise endpoint is also independently callable as a real GLM-backed HTTP route.
 5. Containment pauses for analyst approval.
 6. Approve, reject, or edit the action.
 7. The resume function completes containment, ticketing, notification, and the final report.
@@ -76,4 +76,4 @@ npx netlify dev --offline --port 8888 --target-port 5176 --functions netlify/fun
 - `npm run verify`: lint, unit tests, TypeScript, production build.
 - `npm run e2e`: desktop and mobile first-viewport Playwright smoke.
 - `npm audit --omit=dev`: production dependency audit.
-- Live GLM smoke tested locally through `/api/health`, `/api/jira/issue`, `/api/agent-run`, `/api/resume-run`, and `/api/replay-run`.
+- Live provider smoke tested locally and in production through `/api/health`, `/api/jira/issue`, `/api/agent-run`, `/api/resume-run`, and `/api/replay-run`.

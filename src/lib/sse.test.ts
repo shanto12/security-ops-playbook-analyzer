@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseSseFrames } from './sse'
+import { consumeSse, createMockSseResponse, parseSseFrames } from './sse'
 
 describe('parseSseFrames', () => {
   it('parses named JSON events and keeps the partial frame', () => {
@@ -9,5 +9,10 @@ describe('parseSseFrames', () => {
 
     expect(parsed.events).toEqual([{ event: 'start', data: { ok: true } }])
     expect(parsed.remainder).toContain('event: delta')
+  })
+
+  it('throws when a stream closes without a terminal event', async () => {
+    const response = createMockSseResponse([{ event: 'start', data: { ok: true } }])
+    await expect(consumeSse(response, () => undefined)).rejects.toThrow(/terminal graph event/)
   })
 })

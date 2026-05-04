@@ -12,6 +12,7 @@ function extractJson(text) {
   }
 }
 var replay_run_default = async (req) => {
+  if (req.method !== "POST") return Response.json({ error: "Method not allowed" }, { status: 405 });
   let body;
   try {
     body = await req.json();

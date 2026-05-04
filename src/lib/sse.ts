@@ -35,6 +35,7 @@ export function parseSseFrames(buffer: string): { events: SseEvent[]; remainder:
 export async function consumeSse(
   response: Response,
   onEvent: (event: SseEvent) => void,
+  terminalEvents = new Set(['done', 'approval_required', 'complete']),
 ): Promise<void> {
   if (!response.ok) {
     const text = await response.text().catch(() => '')
@@ -45,6 +46,11 @@ export async function consumeSse(
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let sawTerminal = false
+  const emit = (event: SseEvent) => {
+    if (terminalEvents.has(event.event)) sawTerminal = true
+    onEvent(event)
+  }
 
   for (;;) {
     const { value, done } = await reader.read()
@@ -52,12 +58,15 @@ export async function consumeSse(
     buffer += decoder.decode(value, { stream: true })
     const parsed = parseSseFrames(buffer)
     buffer = parsed.remainder
-    parsed.events.forEach(onEvent)
+    parsed.events.forEach(emit)
   }
 
   buffer += decoder.decode()
   const parsed = parseSseFrames(buffer + '\n\n')
-  parsed.events.forEach(onEvent)
+  parsed.events.forEach(emit)
+  if (!sawTerminal) {
+    throw new Error('SSE stream ended before a terminal graph event')
+  }
 }
 
 export function createMockSseResponse(events: SseEvent[]): Response {

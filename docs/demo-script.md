@@ -2,7 +2,7 @@
 
 ## 90 Seconds
 
-This is a SOC AI Agent demo focused on LangGraph mechanics. I click Generate Incident once. GLM creates a fresh incident, the supervisor routes the graph, and ten enterprise tools are called through real HTTP endpoints. The graph pauses before containment, which demonstrates interrupt/resume. After approval, the system creates ticketing and notification artifacts and streams a final incident report. I can also fork any checkpoint to show time-travel debugging.
+This is a SOC AI Agent demo focused on LangGraph mechanics. I click Generate Incident once. The hosted provider creates a fresh incident, the supervisor routes the graph, and ten enterprise tool results fan out in a visible Send-style superstep. The individual enterprise endpoints are also real GLM-backed HTTP routes for direct inspection. The graph pauses before containment, which demonstrates interrupt/resume. After approval, the system creates ticketing and notification artifacts and streams a final incident report. I can also fork any checkpoint to show time-travel debugging.
 
 ## 5 Minutes
 

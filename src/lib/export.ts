@@ -16,11 +16,11 @@ export function downloadReportPdf(incident: Incident | undefined, report: FinalR
   const reportWindow = window.open('', '_blank', 'noopener,noreferrer')
   if (!reportWindow) return
 
-  const list = (items: string[]) => items.map((item) => `<li>${escapeHtml(item)}</li>`).join('')
-  const section = (title: string, body: string | string[]) => `
+  const list = (items: unknown) => safeList(items).map((item) => `<li>${escapeHtml(item)}</li>`).join('')
+  const section = (title: string, body: unknown) => `
     <section>
       <h2>${escapeHtml(title)}</h2>
-      ${Array.isArray(body) ? `<ul>${list(body)}</ul>` : `<p>${escapeHtml(body)}</p>`}
+      ${Array.isArray(body) ? `<ul>${list(body)}</ul>` : `<p>${escapeHtml(String(body ?? ''))}</p>`}
     </section>
   `
 
@@ -86,7 +86,7 @@ export function buildRunExport(state: RunState) {
 }
 
 function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => {
     switch (character) {
       case '&':
         return '&amp;'
@@ -100,4 +100,10 @@ function escapeHtml(value: string) {
         return '&#39;'
     }
   })
+}
+
+function safeList(value: unknown) {
+  if (Array.isArray(value)) return value.map((item) => String(item))
+  if (typeof value === 'string' && value.trim()) return [value]
+  return []
 }
