@@ -13,7 +13,7 @@ export function downloadJson(filename: string, value: unknown) {
 export function downloadReportPdf(incident: Incident | undefined, report: FinalReport | undefined) {
   if (!incident || !report) return
 
-  const reportWindow = window.open('', '_blank', 'noopener,noreferrer')
+  const reportWindow = window.open('', '_blank')
   if (!reportWindow) return
 
   const list = (items: unknown) => safeList(items).map((item) => `<li>${escapeHtml(item)}</li>`).join('')

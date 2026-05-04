@@ -129,8 +129,8 @@ export default async (req: Request) => {
             method: 'POST',
             body: requestBody,
           }),
-          rawResponsePayload: sanitizeForLog(parsed),
-          parsedResponsePayload: sanitizeForLog(fork),
+          rawResponsePayload: sanitizeForLog(rawResponse),
+          parsedResponsePayload: sanitizeForLog(parsedOutput),
           responsePayload: sanitizeForLog({
             provider: 'z.ai',
               model,
@@ -236,6 +236,7 @@ export default async (req: Request) => {
         send('done', {})
       } catch (error) {
         send('error', { message: error instanceof Error ? error.message : 'Replay failed' })
+        send('done', {})
       } finally {
         controller.close()
       }

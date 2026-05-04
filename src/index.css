@@ -683,6 +683,15 @@ summary {
   line-height: 1.5;
 }
 
+.approval__status {
+  border: 1px solid rgba(105, 215, 255, 0.22);
+  background: rgba(105, 215, 255, 0.08);
+  border-radius: 7px;
+  padding: 9px;
+  color: #c8f5ff !important;
+  font-size: 12px;
+}
+
 .approval textarea {
   width: 100%;
   min-height: 130px;

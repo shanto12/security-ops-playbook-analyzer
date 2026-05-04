@@ -145,6 +145,10 @@ function requiredKey() {
 function fireworksKey() {
   return envValue("FIREWORKS_API_KEY");
 }
+function requestTimeout(name, fallbackMs) {
+  const configured = Number(envValue(name));
+  return Number.isFinite(configured) && configured > 0 ? configured : fallbackMs;
+}
 async function callFireworksJson({
   node,
   prompt,
@@ -180,6 +184,7 @@ async function callFireworksJson({
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json"
       },
+      signal: AbortSignal.timeout(requestTimeout("FIREWORKS_TIMEOUT_MS", 9e3)),
       body: JSON.stringify(requestBody)
     });
   } catch (error) {
@@ -305,6 +310,7 @@ async function callGlmJson({
         "content-type": "application/json",
         "accept-language": "en-US,en"
       },
+      signal: AbortSignal.timeout(requestTimeout("GLM_ORCHESTRATION_TIMEOUT_MS", 18e3)),
       body: JSON.stringify(body)
     });
   } catch (error) {
@@ -713,6 +719,7 @@ data: ${JSON.stringify(data)}
           status: "error",
           type: "error"
         }));
+        send("done", {});
       } finally {
         clearInterval(heartbeat);
         controller.close();

@@ -116,6 +116,21 @@ function normalizeReport(report, incident, decision) {
     toolResultSummary: list(report?.toolResultSummary)
   };
 }
+function summarizeApiLogs(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((log) => log && typeof log === "object").map((log) => {
+    const record = log;
+    const payload = record.parsedResponsePayload ?? record.responsePayload;
+    return {
+      toolName: record.toolName,
+      callerAgent: record.callerAgent,
+      endpointUrl: record.endpointUrl,
+      status: record.status,
+      tokenCount: record.tokenCount,
+      result: payload
+    };
+  }).filter((log) => log.toolName).slice(0, 18);
+}
 function syntheticTool(name, endpoint, agent, payload, body) {
   return makeLog({
     callerAgent: agent,
@@ -316,6 +331,7 @@ data: ${JSON.stringify(data)}
           send("node_start", { node, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         }
         const ticketPayload = { incident, decision, approval: payload.approval, action: "post_resume_update" };
+        const priorToolResults = summarizeApiLogs(payload?.apiLogs);
         const ticketLogs = [
           syntheticTool("ServiceNow", "/api/servicenow/ticket", "Ticketing Agent", ticketPayload, {
             number: `INC${Date.now().toString().slice(-7)}`,
@@ -353,7 +369,10 @@ data: ${JSON.stringify(data)}
           containmentActions: logs.map((log) => `${log.toolName}: ${JSON.stringify(log.responsePayload)}`),
           recommendations: ["Validate affected identity sessions", "Review endpoint process tree", "Add IOC watchlist expiration", "Run post-incident control review"],
           analystDecisions: [`${decision} for ${payload?.approval?.actionName ?? "containment"}`],
-          toolResultSummary: ticketLogs.map((log) => `${log.toolName}: ok`)
+          toolResultSummary: [
+            ...priorToolResults.map((log) => `${log.toolName}: ${log.status ?? "ok"} (${log.tokenCount ?? 0} tokens)`),
+            ...ticketLogs.map((log) => `${log.toolName}: ok`)
+          ]
         };
         let rawReport = fallbackReport;
         try {
@@ -364,6 +383,7 @@ data: ${JSON.stringify(data)}
               approval: payload.approval,
               containmentResults: logs.map((log) => log.responsePayload),
               ticketingResults: ticketLogs.map((log) => log.responsePayload),
+              priorToolResults,
               requiredShape: {
                 executiveSummary: "one sentence",
                 rootCause: "one sentence",
@@ -372,7 +392,7 @@ data: ${JSON.stringify(data)}
                 containmentActions: ["strings"],
                 recommendations: ["four strings"],
                 analystDecisions: ["strings"],
-                toolResultSummary: ["strings"]
+                toolResultSummary: ["summarize each prior enterprise tool plus ticketing/notification result"]
               }
             },
             send
@@ -391,6 +411,7 @@ data: ${JSON.stringify(data)}
         send("done", {});
       } catch (error) {
         send("error", { message: error instanceof Error ? error.message : "Resume failed" });
+        send("done", {});
       } finally {
         clearInterval(heartbeat);
         controller.close();

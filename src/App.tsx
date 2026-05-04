@@ -747,9 +747,13 @@ function ApiLog({ logs }: { logs: ApiLogEntry[] }) {
 function ApprovalCard({
   request,
   onDecision,
+  disabled,
+  statusMessage,
 }: {
   request: ApprovalRequest
   onDecision: (decision: 'approve' | 'reject' | 'edit', args?: Record<string, unknown>) => void
+  disabled?: boolean
+  statusMessage?: string
 }) {
   const [editing, setEditing] = useState(false)
   const [args, setArgs] = useState(JSON.stringify(request.toolArguments, null, 2))
@@ -765,6 +769,7 @@ function ApprovalCard({
         <StatusPill tone={request.severity === 'Critical' ? 'bad' : 'warn'}>{request.severity}</StatusPill>
       </div>
       <p>{request.riskJustification}</p>
+      {statusMessage ? <p className="approval__status">{statusMessage}</p> : null}
       <div className="kv compact">
         <span>Target</span>
         <strong>{request.target}</strong>
@@ -777,7 +782,7 @@ function ApprovalCard({
         <pre>{JSON.stringify(request.toolArguments, null, 2)}</pre>
       )}
       <div className="approval__buttons">
-        <button className="danger" onClick={() => onDecision('reject')}>
+        <button className="danger" disabled={disabled} onClick={() => onDecision('reject')}>
           <X size={15} />
           Reject
         </button>
@@ -787,6 +792,7 @@ function ApprovalCard({
         </button>
         <button
           className="primary"
+          disabled={disabled}
           onClick={() => {
             if (!editing) {
               onDecision('approve')
@@ -811,16 +817,32 @@ function Report({
   incident,
   report,
   run,
+  toolEvidenceComplete,
+  toolEvidenceCount,
 }: {
   incident?: Incident
   report?: FinalReport
   run: RunState
+  toolEvidenceComplete: boolean
+  toolEvidenceCount: number
 }) {
   const mitreMapping = safeList(report?.mitreMapping)
   const recommendations = safeList(report?.recommendations)
+  const timelineItems = safeList(report?.timeline)
+  const containmentActions = safeList(report?.containmentActions)
+  const analystDecisions = safeList(report?.analystDecisions)
+  const toolResultSummary = safeList(report?.toolResultSummary)
+  const waitingText = (() => {
+    if (run.statuses.reporting === 'running') return 'The Reporting Agent is generating the final RCA now.'
+    if (run.approval && !toolEvidenceComplete) {
+      return `Collecting LLM-backed enterprise tool evidence before report generation: ${toolEvidenceCount}/${toolEndpoints.length} complete.`
+    }
+    if (run.approval) return 'Approval is ready. The Reporting Agent will compile the RCA after analyst decision.'
+    return 'The Reporting Agent compiles the final RCA after containment and notifications finish.'
+  })()
 
   return (
-    <section className="panel report">
+    <section className="panel report" id="final-report">
       <div className="panel__title rowBetween">
         <span>
           <FileText size={17} />
@@ -838,7 +860,7 @@ function Report({
         </span>
       </div>
       {!report ? (
-        <p className="muted">The Reporting Agent compiles the final RCA after containment and notifications finish.</p>
+        <p className="muted">{waitingText}</p>
       ) : (
         <div className="reportBody">
           <h3>Executive Summary</h3>
@@ -846,13 +868,26 @@ function Report({
           <h3>Root Cause</h3>
           <p>{report.rootCause}</p>
           <h3>MITRE Mapping</h3>
-          <ul>{mitreMapping.map((item) => <li key={item}>{item}</li>)}</ul>
+          <ReportList items={mitreMapping} />
+          <h3>Investigation Timeline</h3>
+          <ReportList items={timelineItems} />
+          <h3>Containment Actions</h3>
+          <ReportList items={containmentActions} />
           <h3>Recommendations</h3>
-          <ul>{recommendations.map((item) => <li key={item}>{item}</li>)}</ul>
+          <ReportList items={recommendations} />
+          <h3>Analyst Decisions</h3>
+          <ReportList items={analystDecisions} />
+          <h3>Tool Result Summary</h3>
+          <ReportList items={toolResultSummary} />
         </div>
       )}
     </section>
   )
+}
+
+function ReportList({ items }: { items: string[] }) {
+  if (items.length === 0) return <p className="muted">No report entries captured.</p>
+  return <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
 }
 
 function DemoGuide({ health }: { health?: HealthResponse }) {
@@ -898,6 +933,7 @@ function App() {
   const [run, setRun] = useState<RunState>(initialRun)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string>()
+  const [toolFanoutState, setToolFanoutState] = useState<'idle' | 'running' | 'complete'>('idle')
   const fanoutRunRef = useRef(0)
 
   useEffect(() => {
@@ -920,6 +956,7 @@ function App() {
   }, [])
 
   const toolCount = useMemo(() => run.apiLogs.filter((log) => log.type === 'tool').length, [run.apiLogs])
+  const toolEvidenceComplete = toolFanoutState === 'complete' && toolCount >= toolEndpoints.length
   const toolMetric = useMemo(() => {
     const denominator = Math.max(toolEndpoints.length, toolCount)
     return `${toolCount}/${denominator}`
@@ -929,6 +966,11 @@ function App() {
     [run.apiLogs],
   )
 
+  useEffect(() => {
+    if (!run.report) return
+    document.getElementById('final-report')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [run.report])
+
   const handleEvent = (item: SseEvent) => {
     if (item.event === 'error') {
       const data = item.data as { message: string }
@@ -937,11 +979,14 @@ function App() {
     if (item.event === 'incident') {
       const incident = item.data as Incident
       const fanoutId = fanoutRunRef.current
+      setToolFanoutState('running')
       void runEnterpriseToolFanout(incident, (logs) => {
         setRun((current) => {
           if (fanoutId !== fanoutRunRef.current) return current
           return { ...current, apiLogs: [...current.apiLogs, ...logs] }
         })
+      }).finally(() => {
+        if (fanoutId === fanoutRunRef.current) setToolFanoutState('complete')
       })
     }
     setRun((current) => applyRunEvent(current, item))
@@ -951,6 +996,7 @@ function App() {
     fanoutRunRef.current += 1
     setRunning(true)
     setError(undefined)
+    setToolFanoutState('idle')
     setRun(initialRun)
     try {
       const response = await fetch('/api/agent-run', { method: 'POST' })
@@ -967,12 +1013,17 @@ function App() {
     editedArguments?: Record<string, unknown>,
   ) => {
     if (!run.approval) return
+    const approval = run.approval
+    if (!toolEvidenceComplete) {
+      setError(`Final report is waiting for all ${toolEndpoints.length} LLM-backed tool calls to finish.`)
+      return
+    }
     setRunning(true)
     setError(undefined)
     const payload = {
       decision,
       editedArguments,
-      approval: run.approval,
+      approval,
       checkpoints: run.checkpoints,
       timeline: run.timeline,
       apiLogs: run.apiLogs,
@@ -998,14 +1049,30 @@ function App() {
       statuses: { ...current.statuses, containment: decision === 'reject' ? 'failed' : 'running' },
     }))
     try {
+      let resumeFailed = false
       const response = await fetch('/api/resume-run', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      await consumeSse(response, handleEvent)
+      await consumeSse(response, (item) => {
+        if (item.event === 'error') resumeFailed = true
+        handleEvent(item)
+      })
+      if (resumeFailed) {
+        setRun((current) => ({
+          ...current,
+          approval,
+          statuses: { ...current.statuses, containment: 'paused' },
+        }))
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Resume failed')
+      setRun((current) => ({
+        ...current,
+        approval,
+        statuses: { ...current.statuses, containment: 'paused' },
+      }))
     } finally {
       setRunning(false)
     }
@@ -1054,7 +1121,13 @@ function App() {
         <div className="mainColumn">
           <IncidentCard incident={run.incident} />
           <GraphView run={run} />
-          <Report incident={run.incident} report={run.report} run={run} />
+          <Report
+            incident={run.incident}
+            report={run.report}
+            run={run}
+            toolEvidenceComplete={toolEvidenceComplete}
+            toolEvidenceCount={toolCount}
+          />
         </div>
         <div className="sideColumn">
           <DemoGuide health={health} />
@@ -1074,7 +1147,18 @@ function App() {
           <pre>{run.streamText}</pre>
         </section>
       ) : null}
-      {run.approval ? <ApprovalCard request={run.approval} onDecision={decide} /> : null}
+      {run.approval ? (
+        <ApprovalCard
+          request={run.approval}
+          onDecision={decide}
+          disabled={running || !toolEvidenceComplete}
+          statusMessage={
+            toolEvidenceComplete
+              ? 'All enterprise tool evidence is captured. Analyst decision will generate the final report.'
+              : `Waiting for LLM-backed tool evidence: ${toolCount}/${toolEndpoints.length} complete.`
+          }
+        />
+      ) : null}
     </main>
   )
 }

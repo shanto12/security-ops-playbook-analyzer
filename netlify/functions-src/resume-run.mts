@@ -148,6 +148,26 @@ function normalizeReport(report: any, incident: any, decision: string) {
   }
 }
 
+function summarizeApiLogs(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((log) => log && typeof log === 'object')
+    .map((log) => {
+      const record = log as Record<string, any>
+      const payload = record.parsedResponsePayload ?? record.responsePayload
+      return {
+        toolName: record.toolName,
+        callerAgent: record.callerAgent,
+        endpointUrl: record.endpointUrl,
+        status: record.status,
+        tokenCount: record.tokenCount,
+        result: payload,
+      }
+    })
+    .filter((log) => log.toolName)
+    .slice(0, 18)
+}
+
 function syntheticTool(name: string, endpoint: string, agent: string, payload: any, body: any) {
   return makeLog({
     callerAgent: agent,
@@ -356,6 +376,7 @@ export default async (req: Request) => {
           send('node_start', { node, timestamp: new Date().toISOString() })
         }
         const ticketPayload = { incident, decision, approval: payload.approval, action: 'post_resume_update' }
+        const priorToolResults = summarizeApiLogs(payload?.apiLogs)
         const ticketLogs = [
           syntheticTool('ServiceNow', '/api/servicenow/ticket', 'Ticketing Agent', ticketPayload, {
             number: `INC${Date.now().toString().slice(-7)}`,
@@ -394,7 +415,10 @@ export default async (req: Request) => {
             containmentActions: logs.map((log) => `${log.toolName}: ${JSON.stringify(log.responsePayload)}`),
             recommendations: ['Validate affected identity sessions', 'Review endpoint process tree', 'Add IOC watchlist expiration', 'Run post-incident control review'],
             analystDecisions: [`${decision} for ${payload?.approval?.actionName ?? 'containment'}`],
-            toolResultSummary: ticketLogs.map((log) => `${log.toolName}: ok`),
+            toolResultSummary: [
+              ...priorToolResults.map((log) => `${log.toolName}: ${log.status ?? 'ok'} (${log.tokenCount ?? 0} tokens)`),
+              ...ticketLogs.map((log) => `${log.toolName}: ok`),
+            ],
           }
         let rawReport = fallbackReport
         try {
@@ -405,6 +429,7 @@ export default async (req: Request) => {
               approval: payload.approval,
               containmentResults: logs.map((log) => log.responsePayload),
               ticketingResults: ticketLogs.map((log) => log.responsePayload),
+              priorToolResults,
               requiredShape: {
                 executiveSummary: 'one sentence',
                 rootCause: 'one sentence',
@@ -413,7 +438,7 @@ export default async (req: Request) => {
                 containmentActions: ['strings'],
                 recommendations: ['four strings'],
                 analystDecisions: ['strings'],
-                toolResultSummary: ['strings'],
+                toolResultSummary: ['summarize each prior enterprise tool plus ticketing/notification result'],
               },
             },
             send,
@@ -432,6 +457,7 @@ export default async (req: Request) => {
         send('done', {})
       } catch (error) {
         send('error', { message: error instanceof Error ? error.message : 'Resume failed' })
+        send('done', {})
       } finally {
         clearInterval(heartbeat)
         controller.close()

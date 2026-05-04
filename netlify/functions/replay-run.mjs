@@ -112,8 +112,8 @@ data: ${JSON.stringify(data)}
               method: "POST",
               body: requestBody
             }),
-            rawResponsePayload: sanitizeForLog(parsed),
-            parsedResponsePayload: sanitizeForLog(fork),
+            rawResponsePayload: sanitizeForLog(rawResponse),
+            parsedResponsePayload: sanitizeForLog(parsedOutput),
             responsePayload: sanitizeForLog({
               provider: "z.ai",
               model,
@@ -217,6 +217,7 @@ data: ${JSON.stringify(data)}
         send("done", {});
       } catch (error) {
         send("error", { message: error instanceof Error ? error.message : "Replay failed" });
+        send("done", {});
       } finally {
         controller.close();
       }
