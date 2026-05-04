@@ -4,7 +4,7 @@
   "targetCompany": "Public security automation demo",
   "targetRole": "SOC automation / AI security engineer",
   "archetype": "security-ops-simulator",
-  "status": "draft",
+  "status": "production",
   "routes": [
     "/",
     "/api/health",
@@ -26,9 +26,9 @@
     "/api/m365/audit",
     "/api/cloudtrail/search"
   ],
-  "netlifySite": null,
-  "productionUrl": null,
-  "repoUrl": null,
+  "netlifySite": "d3b66189-3162-4fa3-88ef-07f7f69b7373",
+  "productionUrl": "https://security-ops-playbook-analyzer.netlify.app",
+  "repoUrl": "https://github.com/shanto12/security-ops-playbook-analyzer",
   "previewPolicy": "public-demo",
   "dataPolicy": "synthetic-incidents-with-live-llm-generation",
   "packageMode": "resume-and-interview"

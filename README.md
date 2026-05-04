@@ -4,6 +4,9 @@ Enterprise-grade single-page demo showing an AI-driven SOC incident investigatio
 
 Independent concept demo. Synthetic incident data only.
 
+- Live app: https://security-ops-playbook-analyzer.netlify.app
+- GitHub: https://github.com/shanto12/security-ops-playbook-analyzer
+
 ## Live Workflow
 
 1. Click **Generate Incident**.
