@@ -9,7 +9,7 @@ The public demo is optimized for Netlify:
 - Server-Sent Events for long-running graph execution.
 - Z.ai GLM-5.1 for incident generation, containment reasoning, reporting, and fallback orchestration.
 - Z.ai GLM-5-Turbo for corporate tool endpoints because it is optimized for tool-heavy agent workflows and keeps the hosted demo under Netlify function limits.
-- Fireworks `deepseek-v4-pro` for the hosted pre-approval graph superstep when configured, because it keeps the live approval path comfortably under Netlify's timeout.
+- Fireworks `deepseek-v4-pro` for the hosted pre-approval graph superstep when configured, with reasoning disabled for fast structured JSON, because it keeps the live approval path comfortably under Netlify's timeout.
 
 ## LangGraph Concepts Shown
 

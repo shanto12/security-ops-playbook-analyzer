@@ -14,7 +14,7 @@ Date: 2026-05-04
 - Z.ai key stored in Keychain under `codex-zai-api-key`.
 - General Z.ai endpoint returned insufficient-balance response.
 - Coding endpoint succeeded with `glm-5.1`.
-- Fireworks model list returned `glm-5p1`, `deepseek-v4-pro`, and `minimax-m2p7`; benchmark selected `deepseek-v4-pro` for hosted orchestration.
+- Fireworks model list returned `glm-5p1`, `deepseek-v4-pro`, and `minimax-m2p7`; benchmark selected `deepseek-v4-pro` for hosted orchestration with `reasoning_effort: none`.
 - `/api/health`: returned `mode: live-glm`.
 - `/api/jira/issue`: returned valid Jira-shaped GLM output using `glm-5-turbo`.
 - `/api/okta/user-risk`: returned valid Okta-shaped GLM output.

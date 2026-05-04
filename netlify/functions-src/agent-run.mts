@@ -87,6 +87,7 @@ async function callFireworksJson({
       model,
       temperature,
       max_tokens: maxTokens,
+      reasoning_effort: 'none',
       response_format: { type: 'json_object' },
       messages: [
         {
@@ -107,7 +108,7 @@ async function callFireworksJson({
     toolName: 'Fireworks',
     method: 'POST',
     endpointUrl: `${baseUrl}/chat/completions`,
-    requestPayload: { model, temperature, max_tokens: maxTokens },
+    requestPayload: { model, temperature, max_tokens: maxTokens, reasoning_effort: 'none' },
     responsePayload: result,
     latencyMs: Date.now() - started,
     tokenCount: parsed?.usage?.total_tokens,
@@ -341,23 +342,47 @@ export default async (req: Request) => {
         send('node_start', { node: 'incident_generator', timestamp: new Date().toISOString() })
         const compactTools = toolEndpoints.map((tool) => `${tool.name}:${tool.endpoint}`).join('; ')
         const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Keys: incident, supervisor, triage, toolResults, containment. incident must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet. supervisor={route,rationale,selectedAgents,confidence}. triage={classification,dedupeStatus,riskScore,keyFindings}. toolResults must have exactly 10 items in this order: ${compactTools}. Each item={name,endpoint,responsePayload:{verdict,evidence},confidence}. containment={actionName,target,toolArguments,riskJustification}. Keep evidence short and include incident IOC/entity.`
-        const orchestratedRun = fireworksKey()
-          ? await callFireworksJson({
+        let orchestratedRun
+        if (fireworksKey()) {
+          try {
+            orchestratedRun = await callFireworksJson({
               node: 'Supervisor Graph Orchestrator',
               prompt: orchestrationPrompt,
               temperature: 0.82,
               maxTokens: 700,
               send,
             })
-          : await callGlmJson({
-              node: 'Supervisor Graph Orchestrator',
-              prompt: orchestrationPrompt,
-              temperature: 0.9,
-              maxTokens: 700,
-              send,
-              streamDeltas: false,
-              modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
-            })
+            if (!orchestratedRun.result?.incident || !orchestratedRun.result?.containment) {
+              throw new Error('Fireworks orchestration JSON missed required graph keys')
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'Fireworks orchestration failed'
+            timeline('Fireworks fallback', `Falling back to Z.ai GLM tool model: ${message}`, 'warning', send)
+            send(
+              'api_call',
+              makeLog({
+                callerAgent: 'Supervisor Graph Orchestrator',
+                toolName: 'Fireworks',
+                method: 'POST',
+                endpointUrl: `${envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'}/chat/completions`,
+                requestPayload: { model: envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro' },
+                responsePayload: { message },
+                latencyMs: 0,
+                status: 'error',
+                type: 'error',
+              }),
+            )
+          }
+        }
+        orchestratedRun ??= await callGlmJson({
+          node: 'Supervisor Graph Orchestrator',
+          prompt: orchestrationPrompt,
+          temperature: 0.9,
+          maxTokens: 700,
+          send,
+          streamDeltas: false,
+          modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
+        })
         const streamPreview = JSON.stringify(orchestratedRun.result)
         for (let index = 0; index < streamPreview.length; index += 96) {
           send('delta', {
