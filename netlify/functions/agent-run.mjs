@@ -274,11 +274,18 @@ data: ${JSON.stringify(data)}
             ]
           },
           temperature: 0.9,
-          maxTokens: 1250,
+          maxTokens: 1e3,
           send,
-          streamDeltas: true,
+          streamDeltas: false,
           modelName: envValue("GLM_TOOL_MODEL") || "glm-5-turbo"
         });
+        const streamPreview = JSON.stringify(orchestratedRun.result);
+        for (let index = 0; index < streamPreview.length; index += 96) {
+          send("delta", {
+            node: "Supervisor Graph Orchestrator",
+            content: streamPreview.slice(index, index + 96)
+          });
+        }
         const runPlan = orchestratedRun.result;
         const incident = runPlan.incident;
         const supervisorResult = runPlan.supervisor ?? {};
