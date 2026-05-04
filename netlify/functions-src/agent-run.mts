@@ -614,20 +614,14 @@ async function callToolLlm(
   incident: any,
   state: any,
 ): Promise<{ tool: (typeof toolEndpoints)[number]; body: any; log: ApiLogEntry }> {
-  const provider = fireworksKey() ? 'fireworks' : 'z.ai'
-  const apiKey = provider === 'fireworks' ? fireworksKey() : requiredKey()
-  const model =
-    provider === 'fireworks'
-      ? envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
-      : envValue('GLM_TOOL_MODEL') || 'glm-5-turbo'
-  const baseUrl =
-    provider === 'fireworks'
-      ? envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
-      : envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
+  const provider = 'z.ai'
+  const apiKey = requiredKey()
+  const model = envValue('GLM_TOOL_MODEL') || 'glm-5-turbo'
+  const baseUrl = envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
   const endpointPath = '/chat/completions'
   const requestBody = {
     model,
-    ...(provider === 'fireworks' ? { reasoning_effort: 'none' } : { thinking: { type: 'disabled' } }),
+    thinking: { type: 'disabled' },
     temperature: 0.76,
     max_tokens: 260,
     stream: false,
@@ -645,7 +639,7 @@ async function callToolLlm(
       headers: {
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
-        ...(provider === 'z.ai' ? { 'accept-language': 'en-US,en' } : {}),
+        'accept-language': 'en-US,en',
       },
       body: JSON.stringify(requestBody),
     })
@@ -846,33 +840,28 @@ export default async (req: Request) => {
         send('node_start', { node: 'incident_generator', timestamp: new Date().toISOString() })
         const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}. i must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet(one line). a={actionName,target,toolArguments,riskJustification}. Keep text short.`
         let orchestratedRun
-        if (fireworksKey()) {
-          try {
-            orchestratedRun = await callFireworksJson({
-              node: 'Supervisor Graph Orchestrator',
-              prompt: orchestrationPrompt,
-              temperature: 0.82,
-              maxTokens: 420,
-              send,
-            })
-            const fireworksResult = orchestratedRun.result as any
-            if (!fireworksResult?.incident && !fireworksResult?.i) {
-              throw new Error('Fireworks orchestration JSON missed required graph keys')
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : 'Fireworks orchestration failed'
-            timeline('Fireworks fallback', `Falling back to Z.ai GLM tool model: ${message}`, 'warning', send)
-          }
+        try {
+          orchestratedRun = await callGlmJson({
+            node: 'Supervisor Graph Orchestrator',
+            prompt: orchestrationPrompt,
+            temperature: 0.9,
+            maxTokens: 420,
+            send,
+            streamDeltas: false,
+            modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
+          })
+        } catch (error) {
+          if (!fireworksKey()) throw error
+          const message = error instanceof Error ? error.message : 'Z.ai orchestration failed'
+          timeline('Z.ai fallback', `Falling back to Fireworks only because Z.ai failed: ${message}`, 'warning', send)
+          orchestratedRun = await callFireworksJson({
+            node: 'Supervisor Graph Orchestrator',
+            prompt: orchestrationPrompt,
+            temperature: 0.82,
+            maxTokens: 420,
+            send,
+          })
         }
-        orchestratedRun ??= await callGlmJson({
-          node: 'Supervisor Graph Orchestrator',
-          prompt: orchestrationPrompt,
-          temperature: 0.9,
-          maxTokens: 420,
-          send,
-          streamDeltas: false,
-          modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
-        })
         const streamPreview = JSON.stringify(orchestratedRun.result)
         for (let index = 0; index < streamPreview.length; index += 96) {
           send('delta', {

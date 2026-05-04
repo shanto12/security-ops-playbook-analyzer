@@ -163,16 +163,23 @@ function syntheticTool(name: string, endpoint: string, agent: string, payload: a
   })
 }
 
-async function fireworksReport(prompt: unknown, send: (event: string, data: unknown) => void) {
-  const apiKey = envValue('FIREWORKS_API_KEY')
-  if (!apiKey) throw new Error('FIREWORKS_API_KEY is not configured')
-  const model = envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
-  const baseUrl = envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
+async function modelReport(prompt: unknown, send: (event: string, data: unknown) => void) {
+  const useGlm = Boolean(envValue('GLM_API_KEY'))
+  const apiKey = useGlm ? envValue('GLM_API_KEY') : envValue('FIREWORKS_API_KEY')
+  if (!apiKey) throw new Error('No report model API key is configured')
+  const provider = useGlm ? 'z.ai' : 'fireworks'
+  const toolName = useGlm ? 'GLM-5.1' : 'Fireworks'
+  const model = useGlm
+    ? envValue('GLM_MODEL') || 'glm-5.1'
+    : envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
+  const baseUrl = useGlm
+    ? envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
+    : envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
   const requestBody = {
     model,
     temperature: 0.72,
     max_tokens: 620,
-    reasoning_effort: 'none',
+    ...(useGlm ? { thinking: { type: 'disabled' } } : { reasoning_effort: 'none' }),
     response_format: { type: 'json_object' },
     messages: [
       {
@@ -190,15 +197,16 @@ async function fireworksReport(prompt: unknown, send: (event: string, data: unkn
       headers: {
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
+        ...(useGlm ? { 'accept-language': 'en-US,en' } : {}),
       },
       body: JSON.stringify(requestBody),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Fireworks request failed'
+    const message = error instanceof Error ? error.message : 'Report model request failed'
     send('api_call', makeLlmAuditLog({
       callerAgent: 'Reporting Agent',
-      provider: 'fireworks',
-      toolName: 'Fireworks',
+      provider,
+      toolName,
       model,
       baseUrl,
       requestBody,
@@ -215,8 +223,8 @@ async function fireworksReport(prompt: unknown, send: (event: string, data: unkn
   if (!response.ok) {
     send('api_call', makeLlmAuditLog({
       callerAgent: 'Reporting Agent',
-      provider: 'fireworks',
-      toolName: 'Fireworks',
+      provider,
+      toolName,
       model,
       baseUrl,
       requestBody,
@@ -227,20 +235,20 @@ async function fireworksReport(prompt: unknown, send: (event: string, data: unkn
       statusCode: response.status,
       statusText: response.statusText,
       ok: false,
-      errorMessage: `Fireworks ${response.status}: ${text.slice(0, 220)}`,
+      errorMessage: `${toolName} ${response.status}: ${text.slice(0, 220)}`,
     }))
-    throw new Error(`Fireworks ${response.status}: ${text.slice(0, 220)}`)
+    throw new Error(`${toolName} ${response.status}: ${text.slice(0, 220)}`)
   }
   const content = parsed?.choices?.[0]?.message?.content ?? '{}'
   let report: any
   try {
     report = extractJson(content)
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Fireworks report parse failed'
+    const message = error instanceof Error ? error.message : 'Report model parse failed'
     send('api_call', makeLlmAuditLog({
       callerAgent: 'Reporting Agent',
-      provider: 'fireworks',
-      toolName: 'Fireworks',
+      provider,
+      toolName,
       model,
       baseUrl,
       requestBody,
@@ -257,8 +265,8 @@ async function fireworksReport(prompt: unknown, send: (event: string, data: unkn
   }
   send('api_call', makeLlmAuditLog({
     callerAgent: 'Reporting Agent',
-    provider: 'fireworks',
-    toolName: 'Fireworks',
+    provider,
+    toolName,
     model,
     baseUrl,
     requestBody,
@@ -392,7 +400,7 @@ export default async (req: Request) => {
           }
         let rawReport = fallbackReport
         try {
-          rawReport = await fireworksReport(
+          rawReport = await modelReport(
             {
               incident,
               decision,
