@@ -75,6 +75,104 @@ const runPlan = {
     toolArguments: { host: 'WS-TEST-001', durationMinutes: 45 },
     riskJustification: 'Containment prevents lateral movement.',
   },
+  routingPlan: [
+    {
+      from: 'supervisor',
+      to: 'triage',
+      kind: 'forward',
+      decision: 'route_initial_triage',
+      reason: 'Supervisor starts triage.',
+      confidence: 0.8,
+    },
+    {
+      from: 'triage',
+      to: 'enrichment',
+      kind: 'parallel',
+      decision: 'expand_iocs',
+      reason: 'Triage expands IOC context.',
+      confidence: 0.82,
+    },
+    {
+      from: 'enrichment',
+      to: 'identity',
+      kind: 'forward',
+      decision: 'check_identity',
+      reason: 'Enrichment pivots to identity.',
+      confidence: 0.83,
+    },
+    {
+      from: 'identity',
+      to: 'endpoint',
+      kind: 'forward',
+      decision: 'check_endpoint',
+      reason: 'Identity pivots to endpoint.',
+      confidence: 0.84,
+    },
+    {
+      from: 'endpoint',
+      to: 'log_analysis',
+      kind: 'forward',
+      decision: 'reduce_logs',
+      reason: 'Endpoint requests log analysis.',
+      confidence: 0.85,
+    },
+    {
+      from: 'log_analysis',
+      to: 'enrichment',
+      kind: 'backtrack',
+      decision: 'loop_back_for_ioc_pivot',
+      reason: 'Log analysis found a new IOC.',
+      confidence: 0.86,
+    },
+    {
+      from: 'enrichment',
+      to: 'identity',
+      kind: 'forward',
+      decision: 'recheck_identity',
+      reason: 'Enrichment updates identity scope.',
+      confidence: 0.87,
+    },
+    {
+      from: 'identity',
+      to: 'endpoint',
+      kind: 'forward',
+      decision: 'recheck_endpoint',
+      reason: 'Identity returns to endpoint.',
+      confidence: 0.88,
+    },
+    {
+      from: 'endpoint',
+      to: 'log_analysis',
+      kind: 'forward',
+      decision: 'second_log_pass',
+      reason: 'Endpoint asks for second log pass.',
+      confidence: 0.89,
+    },
+    {
+      from: 'log_analysis',
+      to: 'threat_intel',
+      kind: 'forward',
+      decision: 'map_ttp',
+      reason: 'Logs are ready for threat intel.',
+      confidence: 0.9,
+    },
+    {
+      from: 'threat_intel',
+      to: 'supervisor',
+      kind: 'backtrack',
+      decision: 'return_to_supervisor',
+      reason: 'Threat intel returns to supervisor.',
+      confidence: 0.91,
+    },
+    {
+      from: 'supervisor',
+      to: 'containment',
+      kind: 'interrupt',
+      decision: 'pause_for_human_approval',
+      reason: 'Supervisor pauses for containment approval.',
+      confidence: 0.92,
+    },
+  ],
 }
 
 function containsPromptOrMessages(value: unknown): boolean {
@@ -130,9 +228,26 @@ describe('LLM API log evidence', () => {
       .filter((log) => log.type === 'tool')
 
     const fanout = events.find((event) => event.event === 'tool_fanout_required')
+    const routes = events
+      .filter((event) => event.event === 'agent_route')
+      .map((event) => event.data as { kind?: string; from?: string; to?: string; checkpointId?: string })
+    const routingLogs = events
+      .filter((event) => event.event === 'api_call')
+      .map((event) => event.data as LlmLog)
+      .filter((log) => log.type === 'routing')
+    const routeCheckpoints = events
+      .filter((event) => event.event === 'checkpoint')
+      .map((event) => event.data as { state?: Record<string, unknown> })
+      .filter((checkpoint) => checkpoint.state?.route)
+
     expect.soft(llmLogs).toHaveLength(1)
     expect.soft(toolLogs).toHaveLength(0)
     expect.soft((fanout?.data as { tools?: unknown[] } | undefined)?.tools).toHaveLength(10)
+    expect.soft(routes.length).toBeGreaterThanOrEqual(8)
+    expect.soft(routes.some((route) => route.kind === 'backtrack' && route.to === 'supervisor')).toBe(true)
+    expect.soft(routes.every((route) => Boolean(route.checkpointId))).toBe(true)
+    expect.soft(routingLogs.length).toBeGreaterThanOrEqual(routes.length)
+    expect.soft(routeCheckpoints.length).toBeGreaterThanOrEqual(routes.length)
     expect.soft(events.some((event) => event.event === 'approval_required')).toBe(true)
     expect.soft(events.at(-1)?.event).toBe('done')
     expectFullLlmEvidence(llmLogs[0])
@@ -177,7 +292,7 @@ describe('LLM API log evidence', () => {
   })
 
   it('logs full LLM request and response evidence during resume-run reporting', async () => {
-    vi.stubEnv('FIREWORKS_API_KEY', 'test-key')
+    vi.stubEnv('GLM_API_KEY', 'test-key')
     vi.stubGlobal(
       'fetch',
       vi.fn(async () =>
@@ -187,6 +302,7 @@ describe('LLM API log evidence', () => {
             rootCause: 'Credential access test root cause.',
             mitreMapping: ['Credential Access', 'T1003'],
             timeline: ['Incident created', 'Containment approved'],
+            agentRouting: ['Log Analysis -> Enrichment (backtrack)', 'Threat Intel -> Supervisor (backtrack)'],
             containmentActions: ['Host isolation queued'],
             recommendations: ['Rotate credentials'],
             analystDecisions: ['approve isolate_host'],
@@ -211,6 +327,7 @@ describe('LLM API log evidence', () => {
             severity: 'High',
             incident: runPlan.i,
           },
+          routes: runPlan.routingPlan,
         }),
       }),
     )
@@ -222,6 +339,8 @@ describe('LLM API log evidence', () => {
 
     expect.soft(llmLogs).toHaveLength(1)
     expect.soft(events.some((event) => event.event === 'report')).toBe(true)
+    const report = events.find((event) => event.event === 'report')?.data as { agentRouting?: string[] } | undefined
+    expect.soft(report?.agentRouting?.some((item) => /backtrack|Supervisor/i.test(item))).toBe(true)
     expect.soft(events.at(-1)?.event).toBe('done')
     expectFullLlmEvidence(llmLogs[0])
   })

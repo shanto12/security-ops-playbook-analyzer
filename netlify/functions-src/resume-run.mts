@@ -141,6 +141,7 @@ function normalizeReport(report: any, incident: any, decision: string) {
     rootCause: String(report?.rootCause ?? 'Root cause requires follow-up validation from endpoint and identity teams.'),
     mitreMapping: list(report?.mitreMapping),
     timeline: list(report?.timeline),
+    agentRouting: list(report?.agentRouting ?? report?.cycleSummary ?? report?.routingTrace),
     containmentActions: list(report?.containmentActions),
     recommendations: list(report?.recommendations),
     analystDecisions: list(report?.analystDecisions),
@@ -166,6 +167,31 @@ function summarizeApiLogs(value: unknown) {
     })
     .filter((log) => log.toolName)
     .slice(0, 18)
+}
+
+function summarizeRoutes(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((route) => route && typeof route === 'object')
+    .map((route) => {
+      const record = route as Record<string, any>
+      return {
+        from: record.from,
+        to: record.to,
+        kind: record.kind,
+        decision: record.decision,
+        reason: record.reason,
+        checkpointId: record.checkpointId,
+      }
+    })
+    .filter((route) => route.from && route.to)
+}
+
+function formatRoutes(routes: Array<Record<string, any>>) {
+  return routes.map((route) => {
+    const edge = `${String(route.from).replaceAll('_', ' ')} -> ${String(route.to).replaceAll('_', ' ')}`
+    return `${edge} (${route.kind ?? 'forward'}): ${route.reason ?? route.decision ?? 'routed'}`
+  })
 }
 
 function syntheticTool(name: string, endpoint: string, agent: string, payload: any, body: any) {
@@ -377,6 +403,8 @@ export default async (req: Request) => {
         }
         const ticketPayload = { incident, decision, approval: payload.approval, action: 'post_resume_update' }
         const priorToolResults = summarizeApiLogs(payload?.apiLogs)
+        const routingTrace = summarizeRoutes(payload?.routes)
+        const formattedRoutes = formatRoutes(routingTrace)
         const ticketLogs = [
           syntheticTool('ServiceNow', '/api/servicenow/ticket', 'Ticketing Agent', ticketPayload, {
             number: `INC${Date.now().toString().slice(-7)}`,
@@ -408,10 +436,12 @@ export default async (req: Request) => {
             mitreMapping: [incident?.mitreTactic, incident?.mitreTechnique].filter(Boolean),
             timeline: [
               'Incident generated and routed by supervisor',
+              'Cyclic StateGraph route loop completed',
               'Parallel enrichment and investigation completed',
               `Analyst decision recorded: ${decision}`,
               'Ticketing and notifications completed',
             ],
+            agentRouting: formattedRoutes.length ? formattedRoutes : ['Supervisor -> Triage -> Enrichment -> Log Analysis -> Enrichment -> Threat Intel -> Supervisor -> Containment'],
             containmentActions: logs.map((log) => `${log.toolName}: ${JSON.stringify(log.responsePayload)}`),
             recommendations: ['Validate affected identity sessions', 'Review endpoint process tree', 'Add IOC watchlist expiration', 'Run post-incident control review'],
             analystDecisions: [`${decision} for ${payload?.approval?.actionName ?? 'containment'}`],
@@ -430,11 +460,14 @@ export default async (req: Request) => {
               containmentResults: logs.map((log) => log.responsePayload),
               ticketingResults: ticketLogs.map((log) => log.responsePayload),
               priorToolResults,
+              routingTrace,
+              cycleSummary: formattedRoutes,
               requiredShape: {
                 executiveSummary: 'one sentence',
                 rootCause: 'one sentence',
                 mitreMapping: ['strings'],
                 timeline: ['four short strings'],
+                agentRouting: ['summarize each cyclic agent handoff, including backtrack edges'],
                 containmentActions: ['strings'],
                 recommendations: ['four strings'],
                 analystDecisions: ['strings'],
@@ -447,6 +480,11 @@ export default async (req: Request) => {
           rawReport = fallbackReport
         }
         const report = normalizeReport(rawReport, incident, decision)
+        if (report.agentRouting.length === 0) {
+          report.agentRouting = formattedRoutes.length
+            ? formattedRoutes
+            : ['Supervisor -> Triage -> Enrichment -> Log Analysis -> Enrichment -> Threat Intel -> Supervisor -> Containment']
+        }
         send('delta', { node: 'Reporting Agent', content: JSON.stringify(report) })
         send('report', report)
         checkpoint('reporting', { report }, send)

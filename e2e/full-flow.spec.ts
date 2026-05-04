@@ -41,11 +41,91 @@ const report = {
   rootCause: 'Credential dumping behavior on WS-E2E-001 matched the suspicious IOC set.',
   mitreMapping: ['Credential Access', 'T1003 OS Credential Dumping'],
   timeline: ['Incident generated', 'Tool enrichment completed', 'Containment approved', 'Report generated'],
+  agentRouting: [
+    'Supervisor -> Triage: initial route',
+    'Triage -> Enrichment: IOC expansion',
+    'Log Analysis -> Enrichment (backtrack): second-stage IOC pivot',
+    'Threat Intel -> Supervisor (backtrack): final route review',
+    'Supervisor -> Containment: HITL interrupt',
+  ],
   containmentActions: ['Firewall block staged', 'EDR isolation queued'],
   recommendations: ['Rotate credentials', 'Review EDR process tree', 'Hunt related hosts', 'Expire IOC blocks after review'],
   analystDecisions: ['approve isolate_host'],
   toolResultSummary: toolEndpoints.map((tool) => `${tool.name}: ok`),
 }
+
+const routeEvents = [
+  {
+    id: 'route-supervisor-triage',
+    runId: 'run-e2e',
+    threadId: 'thread-e2e',
+    cycleId: 'cycle-investigation',
+    from: 'supervisor',
+    to: 'triage',
+    reason: 'Supervisor sends the case to triage.',
+    decision: 'route_initial_triage',
+    kind: 'forward',
+    iteration: 1,
+    checkpointId: 'ckpt-route-supervisor-triage',
+    timestamp: new Date().toISOString(),
+  },
+  {
+    id: 'route-triage-enrichment',
+    runId: 'run-e2e',
+    threadId: 'thread-e2e',
+    cycleId: 'cycle-investigation',
+    from: 'triage',
+    to: 'enrichment',
+    reason: 'Triage sends IOCs to enrichment.',
+    decision: 'expand_ioc_context',
+    kind: 'parallel',
+    iteration: 2,
+    checkpointId: 'ckpt-route-triage-enrichment',
+    timestamp: new Date().toISOString(),
+  },
+  {
+    id: 'route-log-enrichment',
+    runId: 'run-e2e',
+    threadId: 'thread-e2e',
+    cycleId: 'cycle-investigation',
+    from: 'log_analysis',
+    to: 'enrichment',
+    reason: 'Log Analysis found a second IOC and routes back to Enrichment.',
+    decision: 'loop_back_for_ioc_pivot',
+    kind: 'backtrack',
+    iteration: 3,
+    checkpointId: 'ckpt-route-log-enrichment',
+    timestamp: new Date().toISOString(),
+  },
+  {
+    id: 'route-threat-supervisor',
+    runId: 'run-e2e',
+    threadId: 'thread-e2e',
+    cycleId: 'cycle-investigation',
+    from: 'threat_intel',
+    to: 'supervisor',
+    reason: 'Threat Intel returns the case to Supervisor for final containment routing.',
+    decision: 'return_to_supervisor_for_final_route',
+    kind: 'backtrack',
+    iteration: 4,
+    checkpointId: 'ckpt-route-threat-supervisor',
+    timestamp: new Date().toISOString(),
+  },
+  {
+    id: 'route-supervisor-containment',
+    runId: 'run-e2e',
+    threadId: 'thread-e2e',
+    cycleId: 'cycle-investigation',
+    from: 'supervisor',
+    to: 'containment',
+    reason: 'Supervisor pauses for containment approval.',
+    decision: 'pause_for_human_approval',
+    kind: 'interrupt',
+    iteration: 5,
+    checkpointId: 'ckpt-route-supervisor-containment',
+    timestamp: new Date().toISOString(),
+  },
+]
 
 function sse(events: Array<{ event: string; data: unknown }>) {
   return events.map((item) => `event: ${item.event}\ndata: ${JSON.stringify(item.data)}\n\n`).join('')
@@ -59,7 +139,7 @@ async function routeBaseApis(page: Page) {
         service: 'soc-ai-agent-demo',
         status: 'ok',
         mode: 'live-glm',
-        provider: 'z.ai + fireworks',
+        provider: 'z.ai',
         model: 'glm-5.1',
         toolModel: 'glm-5-turbo',
         endpoint: 'https://api.z.ai/api/coding/paas/v4',
@@ -101,6 +181,36 @@ async function routeBaseApis(page: Page) {
         { event: 'incident', data: incident },
         { event: 'checkpoint', data: { id: 'ckpt-e2e', timestamp: new Date().toISOString(), node: 'incident_generator', state: { incident } } },
         { event: 'timeline', data: { id: 'tl-e2e', timestamp: new Date().toISOString(), title: 'Run started', detail: 'E2E run', outcome: 'info' } },
+        ...routeEvents.flatMap((route) => [
+          { event: 'checkpoint', data: { id: route.checkpointId, timestamp: route.timestamp, node: `route_${route.from}_to_${route.to}`, state: { route } } },
+          { event: 'agent_route', data: route },
+          {
+            event: 'api_call',
+            data: {
+              id: `api-${route.id}`,
+              timestamp: route.timestamp,
+              callerAgent: 'LangGraph StateGraph',
+              toolName: route.kind === 'backtrack' ? 'Cyclic Agent Route' : 'Agent Route',
+              method: 'STATEGRAPH_EDGE',
+              endpointUrl: `${route.from}->${route.to}`,
+              requestPayload: { route },
+              responsePayload: route,
+              latencyMs: 0,
+              status: 'ok',
+              type: 'routing',
+            },
+          },
+          {
+            event: 'timeline',
+            data: {
+              id: `tl-${route.id}`,
+              timestamp: route.timestamp,
+              title: route.kind === 'backtrack' ? `Cyclic handoff: ${route.from} -> ${route.to}` : `Agent handoff: ${route.from} -> ${route.to}`,
+              detail: route.reason,
+              outcome: route.kind === 'backtrack' ? 'warning' : 'info',
+            },
+          },
+        ]),
         { event: 'tool_fanout_required', data: { incident, state: {}, tools: toolEndpoints, concurrency: 1, evidenceRequirement: 'e2e' } },
         { event: 'approval_required', data: approval },
         { event: 'done', data: {} },
@@ -203,11 +313,18 @@ test('completes incident, tool evidence, approval, final report, exports, and re
   await expect(approve).toBeDisabled()
   await expect(page.locator('details.apiRow.tool')).toHaveCount(toolEndpoints.length, { timeout: 20_000 })
   await expect(approve).toBeEnabled()
+  await expect(page.getByTestId('handoff-trace')).toContainText('Cyclic Handoff Trace')
+  await expect(page.locator('[data-testid="handoff-row"][data-from="log_analysis"][data-to="enrichment"]')).toBeVisible()
+  await expect(page.locator('[data-testid="handoff-row"][data-from="threat_intel"][data-to="supervisor"]')).toBeVisible()
+  await expect(page.locator('details.apiRow.routing')).toHaveCount(routeEvents.length)
+  await expect(page.locator('[data-testid="checkpoint-row"][data-node="route_log_analysis_to_enrichment"]')).toBeVisible()
   await approve.click()
 
   const finalReport = page.locator('#final-report')
   await expect(finalReport.getByText('Executive Summary')).toBeVisible()
   await expect(finalReport.getByText('Investigation Timeline')).toBeVisible()
+  await expect(finalReport.getByText('Agent Routing & Cycles')).toBeVisible()
+  await expect(finalReport.getByText(/Log Analysis -> Enrichment/i)).toBeVisible()
   await expect(finalReport.getByText('Containment Actions')).toBeVisible()
   await expect(finalReport.getByText('Analyst Decisions')).toBeVisible()
   await expect(finalReport.getByText('Tool Result Summary')).toBeVisible()

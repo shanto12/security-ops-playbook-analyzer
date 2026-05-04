@@ -1,6 +1,6 @@
 export type Severity = 'Critical' | 'High' | 'Medium' | 'Low'
 export type AgentStatus = 'pending' | 'running' | 'complete' | 'failed' | 'paused'
-export type ApiLogType = 'llm' | 'tool' | 'human' | 'error'
+export type ApiLogType = 'llm' | 'tool' | 'human' | 'routing' | 'error'
 export type ApiLogStatus = 'ok' | 'error' | string
 
 export interface LlmMessage {
@@ -71,6 +71,32 @@ export interface GraphNode {
   capability: string
 }
 
+export interface GraphEdge {
+  id: string
+  from: string
+  to: string
+  label: string
+  kind: 'forward' | 'parallel' | 'interrupt' | 'resume' | 'backtrack'
+  cycleId?: string
+}
+
+export interface AgentRoute {
+  id: string
+  runId?: string
+  threadId?: string
+  cycleId: string
+  from: string
+  to: string
+  reason: string
+  decision: string
+  kind: GraphEdge['kind']
+  iteration: number
+  checkpointId?: string
+  timestamp: string
+  confidence?: number
+  stateDelta?: Record<string, unknown>
+}
+
 export interface Checkpoint {
   id: string
   timestamp: string
@@ -128,6 +154,7 @@ export interface FinalReport {
   rootCause: string
   mitreMapping: string[]
   timeline: string[]
+  agentRouting: string[]
   containmentActions: string[]
   recommendations: string[]
   analystDecisions: string[]
@@ -142,6 +169,7 @@ export interface RunState {
   statuses: Record<string, AgentStatus>
   timeline: TimelineEvent[]
   apiLogs: ApiLogEntry[]
+  routes: AgentRoute[]
   checkpoints: Checkpoint[]
   approval?: ApprovalRequest
   report?: FinalReport
@@ -163,6 +191,7 @@ export type RunEvent =
   | { event: 'node_failed'; data: { node: string; timestamp: string; error: string } }
   | { event: 'checkpoint'; data: Checkpoint }
   | { event: 'timeline'; data: TimelineEvent }
+  | { event: 'agent_route'; data: AgentRoute }
   | { event: 'api_call'; data: ApiLogEntry }
   | { event: 'delta'; data: { node: string; content: string } }
   | { event: 'incident'; data: Incident }

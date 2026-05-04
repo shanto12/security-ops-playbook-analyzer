@@ -26,6 +26,8 @@ export default async () => {
       incident_generation: hasKey,
       glm_tool_responses: hasKey,
       fireworks_orchestration: false,
+      real_langgraph_stategraph: true,
+      cyclic_back_edges: true,
       sse_streaming: true,
       hitl_interrupt_resume: true,
       checkpoint_replay: true,

@@ -363,15 +363,23 @@ pre {
   font-size: 12px;
 }
 
+.graphFrame {
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
 .graph {
+  position: relative;
   display: grid;
   grid-template-columns: repeat(6, minmax(116px, 1fr));
   grid-template-rows: repeat(3, minmax(104px, 1fr));
   gap: 10px;
+  min-width: 760px;
 }
 
 .graphNode {
   position: relative;
+  z-index: 2;
   min-height: 104px;
   border-radius: 8px;
   border: 1px solid var(--line);
@@ -416,6 +424,17 @@ pre {
   background: var(--green);
 }
 
+.graphNode.routed {
+  box-shadow: inset 0 0 0 1px rgba(188, 167, 255, 0.22);
+}
+
+.graphNode em {
+  align-self: flex-start;
+  color: var(--violet);
+  font-size: 10px;
+  font-style: normal;
+}
+
 .graphNode.failed,
 .graphNode.paused {
   border-color: rgba(255, 207, 106, 0.5);
@@ -430,6 +449,121 @@ pre {
 .graphNode strong {
   font-size: 14px;
   line-height: 1.22;
+}
+
+.graphEdges {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.graphEdge {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.graphEdge line {
+  stroke: rgba(151, 177, 172, 0.18);
+  stroke-width: 1.4;
+  stroke-linecap: round;
+}
+
+.graphEdge.parallel line {
+  stroke-dasharray: 5 6;
+}
+
+.graphEdge.interrupt line,
+.graphEdge.resume line {
+  stroke: rgba(255, 207, 106, 0.22);
+}
+
+.graphEdge.backtrack line {
+  stroke: rgba(188, 167, 255, 0.48);
+  stroke-width: 2;
+  stroke-dasharray: 8 5;
+}
+
+.graphEdge.active line {
+  stroke: var(--green);
+  stroke-width: 2.4;
+  filter: drop-shadow(0 0 5px rgba(83, 243, 185, 0.42));
+}
+
+.graphEdge.backtrack.active line {
+  stroke: var(--violet);
+  filter: drop-shadow(0 0 6px rgba(188, 167, 255, 0.46));
+}
+
+.routeTrace {
+  margin-top: 12px;
+  border: 1px solid rgba(188, 167, 255, 0.22);
+  background: rgba(188, 167, 255, 0.055);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.routeTrace__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.routeTrace__header svg,
+.routeTrace__header strong {
+  color: var(--violet);
+}
+
+.routeTrace__header span {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.routeSteps {
+  display: grid;
+  gap: 8px;
+}
+
+.routeStep {
+  display: grid;
+  grid-template-columns: 34px minmax(150px, 0.9fr) minmax(92px, 0.45fr) minmax(0, 1fr);
+  gap: 9px;
+  align-items: center;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 7px;
+  padding: 9px;
+}
+
+.routeStep span {
+  color: var(--cyan);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.routeStep small {
+  color: var(--muted);
+}
+
+.routeStep p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.routeStep.backtrack {
+  border-color: rgba(188, 167, 255, 0.46);
+  background: rgba(188, 167, 255, 0.09);
+}
+
+.routeStep.backtrack strong,
+.routeStep.backtrack small {
+  color: var(--violet);
 }
 
 .checkpointList,
@@ -454,6 +588,10 @@ pre {
   padding: 11px;
 }
 
+.checkpoint.cycle {
+  border-color: rgba(188, 167, 255, 0.36);
+}
+
 .checkpoint details {
   grid-column: 1 / -1;
 }
@@ -471,6 +609,21 @@ pre {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.checkpointRoute {
+  display: grid;
+  gap: 6px;
+  margin-top: 9px;
+  padding: 9px;
+  border: 1px solid rgba(188, 167, 255, 0.22);
+  background: rgba(188, 167, 255, 0.06);
+  border-radius: 7px;
+}
+
+.checkpointRoute p {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 summary {
@@ -502,6 +655,11 @@ summary {
 
 .timelineItem.warning {
   border-color: rgba(255, 207, 106, 0.32);
+}
+
+.timelineItem.cycleRoute {
+  border-color: rgba(188, 167, 255, 0.36);
+  background: rgba(188, 167, 255, 0.05);
 }
 
 .timelineItem.error {
@@ -539,6 +697,11 @@ summary {
 
 .apiRow.human {
   border-color: rgba(255, 207, 106, 0.35);
+}
+
+.apiRow.routing,
+.apiRow.cycleEvidence {
+  border-color: rgba(188, 167, 255, 0.42);
 }
 
 .apiRow.error {
@@ -737,14 +900,12 @@ summary {
     min-width: 0;
   }
 
-  .graph {
-    grid-template-columns: repeat(3, minmax(120px, 1fr));
-    grid-auto-rows: minmax(104px, 1fr);
+  .routeStep {
+    grid-template-columns: 34px 1fr;
   }
 
-  .graphNode {
-    grid-column: auto !important;
-    grid-row: auto !important;
+  .routeStep p {
+    grid-column: 2;
   }
 }
 
@@ -765,7 +926,6 @@ summary {
 
   .metricsRow,
   .incident__grid,
-  .graph,
   .apiPayloads,
   .evidenceMeta {
     grid-template-columns: 1fr;

@@ -32,6 +32,7 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: /generate incident/i })).toBeInTheDocument()
     expect(await screen.findByText(/LIVE GLM/i)).toBeInTheDocument()
     expect(screen.getByText(/Live LangGraph Execution/i)).toBeInTheDocument()
+    expect(screen.getByText(/Cyclic Handoff Trace/i)).toBeInTheDocument()
     expect(screen.getByText(/Checkpoints & Time Travel/i)).toBeInTheDocument()
   })
 })

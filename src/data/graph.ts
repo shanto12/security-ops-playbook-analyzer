@@ -1,4 +1,4 @@
-import type { GraphNode } from '../lib/types'
+import type { GraphEdge, GraphNode } from '../lib/types'
 
 export const graphNodes: GraphNode[] = [
   {
@@ -14,8 +14,8 @@ export const graphNodes: GraphNode[] = [
     label: 'Supervisor',
     lane: 1,
     order: 1,
-    description: 'Routes specialist subgraphs by severity, confidence, and incident type.',
-    capability: 'Conditional Routing',
+    description: 'Routes specialist subgraphs by severity, confidence, incident type, and cyclic backtrack signals.',
+    capability: 'Cyclic Routing',
   },
   {
     id: 'triage',
@@ -54,8 +54,8 @@ export const graphNodes: GraphNode[] = [
     label: 'Log Analysis',
     lane: 0,
     order: 4,
-    description: 'Runs map-reduce SIEM searches and reconstructs a timeline.',
-    capability: 'Map Reduce',
+    description: 'Runs map-reduce SIEM searches, reconstructs a timeline, and can loop back for more enrichment.',
+    capability: 'Map Reduce + Back Edge',
   },
   {
     id: 'threat_intel',
@@ -96,6 +96,116 @@ export const graphNodes: GraphNode[] = [
     order: 5,
     description: 'Compiles executive report, timeline, RCA, actions, and recommendations.',
     capability: 'Structured Output',
+  },
+]
+
+export const graphEdges: GraphEdge[] = [
+  {
+    id: 'edge-incident-supervisor',
+    from: 'incident_generator',
+    to: 'supervisor',
+    label: 'seed state',
+    kind: 'forward',
+  },
+  {
+    id: 'edge-supervisor-triage',
+    from: 'supervisor',
+    to: 'triage',
+    label: 'route',
+    kind: 'forward',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-triage-enrichment',
+    from: 'triage',
+    to: 'enrichment',
+    label: 'fan-out',
+    kind: 'parallel',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-enrichment-identity',
+    from: 'enrichment',
+    to: 'identity',
+    label: 'identity pivot',
+    kind: 'forward',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-identity-endpoint',
+    from: 'identity',
+    to: 'endpoint',
+    label: 'host pivot',
+    kind: 'forward',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-endpoint-log-analysis',
+    from: 'endpoint',
+    to: 'log_analysis',
+    label: 'timeline',
+    kind: 'forward',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-log-analysis-enrichment',
+    from: 'log_analysis',
+    to: 'enrichment',
+    label: 'low confidence loop',
+    kind: 'backtrack',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-log-analysis-threat-intel',
+    from: 'log_analysis',
+    to: 'threat_intel',
+    label: 'actor match',
+    kind: 'forward',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-threat-intel-supervisor',
+    from: 'threat_intel',
+    to: 'supervisor',
+    label: 'supervisor review',
+    kind: 'backtrack',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-supervisor-containment',
+    from: 'supervisor',
+    to: 'containment',
+    label: 'interrupt',
+    kind: 'interrupt',
+    cycleId: 'cycle-investigation',
+  },
+  {
+    id: 'edge-containment-ticketing',
+    from: 'containment',
+    to: 'ticketing',
+    label: 'resume',
+    kind: 'resume',
+  },
+  {
+    id: 'edge-containment-notification',
+    from: 'containment',
+    to: 'notification',
+    label: 'resume',
+    kind: 'resume',
+  },
+  {
+    id: 'edge-ticketing-reporting',
+    from: 'ticketing',
+    to: 'reporting',
+    label: 'report',
+    kind: 'forward',
+  },
+  {
+    id: 'edge-notification-reporting',
+    from: 'notification',
+    to: 'reporting',
+    label: 'report',
+    kind: 'forward',
   },
 ]
 

@@ -11,16 +11,18 @@ import {
   Pause,
   Play,
   Radio,
+  RefreshCw,
   ShieldAlert,
   Sparkles,
   Workflow,
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { graphNodes, toolEndpoints } from './data/graph'
+import { graphEdges, graphNodes, toolEndpoints } from './data/graph'
 import { buildRunExport, downloadJson, downloadReportPdf } from './lib/export'
 import { consumeSse } from './lib/sse'
 import type {
+  AgentRoute,
   ApiLogEntry,
   ApprovalRequest,
   Checkpoint,
@@ -40,6 +42,7 @@ const initialRun: RunState = {
   statuses: Object.fromEntries(graphNodes.map((node) => [node.id, 'pending'])),
   timeline: [],
   apiLogs: [],
+  routes: [],
   checkpoints: [],
   streamText: '',
 }
@@ -388,6 +391,8 @@ function applyRunEvent(current: RunState, item: SseEvent): RunState {
     }
     case 'timeline':
       return { ...current, timeline: [...current.timeline, item.data as TimelineEvent] }
+    case 'agent_route':
+      return { ...current, routes: [...current.routes, item.data as AgentRoute] }
     case 'checkpoint':
       return { ...current, checkpoints: [...current.checkpoints, item.data as Checkpoint] }
     case 'api_call':
@@ -518,34 +523,110 @@ function IncidentCard({ incident }: { incident?: Incident }) {
   )
 }
 
+const nodeLabel = new Map(graphNodes.map((node) => [node.id, node.label]))
+
+function formatNode(value?: string) {
+  if (!value) return 'unknown'
+  return nodeLabel.get(value) ?? value.replaceAll('_', ' ')
+}
+
+function routeText(route: AgentRoute) {
+  return `${formatNode(route.from)} -> ${formatNode(route.to)}`
+}
+
 function GraphView({ run }: { run: RunState }) {
+  const activeRouteIds = new Set(run.routes.map((route) => `${route.from}->${route.to}`))
+  const backtrackCount = run.routes.filter((route) => route.kind === 'backtrack').length
+
   return (
     <section className="panel graphPanel">
-      <div className="panel__title">
-        <Workflow size={17} />
-        Live LangGraph Execution
+      <div className="panel__title rowBetween">
+        <span>
+          <Workflow size={17} />
+          Live LangGraph Execution
+        </span>
+        <StatusPill tone={backtrackCount > 0 ? 'warn' : 'ok'}>
+          {backtrackCount > 0 ? `${backtrackCount} cyclic back edges` : 'cycle ready'}
+        </StatusPill>
       </div>
-      <div className="graph">
-        {graphNodes.map((node) => {
-          const status = run.statuses[node.id] ?? 'pending'
-          return (
-            <div
-              className={`graphNode ${status} ${run.activeNode === node.id ? 'active' : ''}`}
-              key={node.id}
-              style={{
-                gridColumn: node.order + 1,
-                gridRow: node.lane + 1,
-              }}
-              title={node.description}
-            >
-              <span className="graphNode__capability">{node.capability}</span>
-              <strong>{node.label}</strong>
-              <small>{statusLabel[status]}</small>
-            </div>
-          )
-        })}
+      <div className="graphFrame">
+        <div className="graph">
+          <div className="graphEdges" aria-hidden="true">
+            {graphEdges.map((edge) => {
+              const from = graphNodes.find((node) => node.id === edge.from)
+              const to = graphNodes.find((node) => node.id === edge.to)
+              if (!from || !to) return null
+              const active = activeRouteIds.has(`${edge.from}->${edge.to}`)
+              const x1 = `${(from.order + 0.5) * (100 / 6)}%`
+              const y1 = `${(from.lane + 0.5) * (100 / 3)}%`
+              const x2 = `${(to.order + 0.5) * (100 / 6)}%`
+              const y2 = `${(to.lane + 0.5) * (100 / 3)}%`
+              return (
+                <svg className={`graphEdge ${edge.kind} ${active ? 'active' : ''}`} key={edge.id}>
+                  <line x1={x1} y1={y1} x2={x2} y2={y2} />
+                </svg>
+              )
+            })}
+          </div>
+          {graphNodes.map((node) => {
+            const status = run.statuses[node.id] ?? 'pending'
+            const routeHits = run.routes.filter((route) => route.from === node.id || route.to === node.id).length
+            return (
+              <div
+                className={`graphNode ${status} ${run.activeNode === node.id ? 'active' : ''} ${routeHits ? 'routed' : ''}`}
+                key={node.id}
+                data-testid="graph-node"
+                data-node-id={node.id}
+                style={{
+                  gridColumn: node.order + 1,
+                  gridRow: node.lane + 1,
+                }}
+                title={node.description}
+              >
+                <span className="graphNode__capability">{node.capability}</span>
+                <strong>{node.label}</strong>
+                <small>{statusLabel[status]}</small>
+                {routeHits ? <em>{routeHits} routes</em> : null}
+              </div>
+            )
+          })}
+        </div>
       </div>
+      <RouteTrace routes={run.routes} />
     </section>
+  )
+}
+
+function RouteTrace({ routes }: { routes: AgentRoute[] }) {
+  return (
+    <div className="routeTrace" data-testid="handoff-trace">
+      <div className="routeTrace__header">
+        <RefreshCw size={14} />
+        <strong>Cyclic Handoff Trace</strong>
+        <span>{routes.length ? `${routes.length} decisions` : 'waiting for graph'}</span>
+      </div>
+      {routes.length === 0 ? (
+        <p className="muted">The StateGraph will list every agent handoff, including back edges to earlier agents.</p>
+      ) : (
+        <div className="routeSteps">
+          {routes.map((route, index) => (
+            <div
+              className={`routeStep ${route.kind}`}
+              data-testid="handoff-row"
+              data-from={route.from}
+              data-to={route.to}
+              data-kind={route.kind}
+              key={route.id}
+            >
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <strong>{routeText(route)}</strong>
+              <small>{route.kind === 'backtrack' ? 'Cyclic back edge' : route.decision}</small>
+              <p>{route.reason}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -567,7 +648,12 @@ function Checkpoints({
           <p className="muted">Checkpoint snapshots will appear after each node commits state.</p>
         ) : (
           checkpoints.map((item) => (
-            <div className="checkpoint" key={item.id}>
+            <div
+              className={`checkpoint ${item.node.includes('route') || item.node === 'time_travel_fork' ? 'cycle' : ''}`}
+              data-testid="checkpoint-row"
+              data-node={item.node}
+              key={item.id}
+            >
               <div>
                 <span className="mono">{item.id}</span>
                 <strong>{item.node}</strong>
@@ -581,6 +667,22 @@ function Checkpoints({
                 <summary>
                   <Braces size={14} /> State
                 </summary>
+                {isRecord(item.state.route) ? (
+                  <div className="checkpointRoute">
+                    <StatusPill tone={(item.state.route as unknown as AgentRoute).kind === 'backtrack' ? 'warn' : 'ok'}>
+                      {(item.state.route as unknown as AgentRoute).kind === 'backtrack' ? 'Cyclic route' : 'Route'}
+                    </StatusPill>
+                    <strong>{routeText(item.state.route as unknown as AgentRoute)}</strong>
+                    <p>{(item.state.route as unknown as AgentRoute).reason}</p>
+                  </div>
+                ) : null}
+                {item.node === 'time_travel_fork' ? (
+                  <div className="checkpointRoute">
+                    <StatusPill tone="warn">Replay branch</StatusPill>
+                    <strong>{String(item.state.branchName ?? 'alternate branch')}</strong>
+                    <p>{String(item.state.changedDecision ?? item.state.nextAction ?? 'Forked route reviewed')}</p>
+                  </div>
+                ) : null}
                 <pre>{JSON.stringify(item.state, null, 2)}</pre>
               </details>
             </div>
@@ -603,10 +705,14 @@ function Timeline({ events }: { events: TimelineEvent[] }) {
           <p className="muted">No events yet.</p>
         ) : (
           events.map((item) => (
-            <div className={`timelineItem ${item.outcome}`} key={item.id}>
+            <div
+              className={`timelineItem ${item.outcome} ${/cyclic|back edge|Forked/i.test(`${item.title} ${item.detail}`) ? 'cycleRoute' : ''}`}
+              key={item.id}
+            >
               <span>{shortTime(item.timestamp)}</span>
               <div>
                 <strong>{item.title}</strong>
+                {/Forked/i.test(item.title) ? <small>Cycle: checkpoint -&gt; supervisor</small> : null}
                 <p>{item.detail}</p>
                 {item.durationMs ? <small>{duration(item.durationMs)}</small> : null}
               </div>
@@ -712,6 +818,7 @@ function ApiLog({ logs }: { logs: ApiLogEntry[] }) {
           <option value="llm">LLM</option>
           <option value="tool">Tools</option>
           <option value="human">Human</option>
+          <option value="routing">Routing</option>
           <option value="error">Errors</option>
         </select>
       </div>
@@ -720,7 +827,13 @@ function ApiLog({ logs }: { logs: ApiLogEntry[] }) {
           <p className="muted">Every GLM and tool request lands here with payloads and latency.</p>
         ) : (
           filtered.map((log) => (
-            <details className={`apiRow ${log.type}`} key={log.id}>
+            <details
+              className={`apiRow ${log.type} ${/route|handoff|Time Travel/i.test(`${log.callerAgent} ${log.toolName}`) ? 'cycleEvidence' : ''}`}
+              data-testid="api-row"
+              data-type={log.type}
+              data-agent={log.callerAgent}
+              key={log.id}
+            >
               <summary>
                 <span>{shortTime(log.timestamp)}</span>
                 <strong>{log.toolName}</strong>
@@ -829,6 +942,7 @@ function Report({
   const mitreMapping = safeList(report?.mitreMapping)
   const recommendations = safeList(report?.recommendations)
   const timelineItems = safeList(report?.timeline)
+  const agentRouting = safeList(report?.agentRouting)
   const containmentActions = safeList(report?.containmentActions)
   const analystDecisions = safeList(report?.analystDecisions)
   const toolResultSummary = safeList(report?.toolResultSummary)
@@ -871,6 +985,8 @@ function Report({
           <ReportList items={mitreMapping} />
           <h3>Investigation Timeline</h3>
           <ReportList items={timelineItems} />
+          <h3>Agent Routing &amp; Cycles</h3>
+          <ReportList items={agentRouting} />
           <h3>Containment Actions</h3>
           <ReportList items={containmentActions} />
           <h3>Recommendations</h3>
@@ -919,8 +1035,9 @@ function DemoGuide({ health }: { health?: HealthResponse }) {
         <div>
           <h3>LangGraph proof points</h3>
           <p>
-            StateGraph, supervisor routing, specialist subgraphs, Send fan-out, interrupt/resume,
-            SQLite-style checkpoint IDs, time travel, map-reduce, streaming, and audit logging.
+            Real StateGraph orchestration, cyclic back edges, supervisor re-entry, specialist
+            subgraphs, Send fan-out, interrupt/resume, checkpoint IDs, time travel, map-reduce,
+            streaming, and audit logging.
           </p>
         </div>
       </div>
@@ -1025,6 +1142,7 @@ function App() {
       editedArguments,
       approval,
       checkpoints: run.checkpoints,
+      routes: run.routes,
       timeline: run.timeline,
       apiLogs: run.apiLogs,
       streamText: run.streamText,

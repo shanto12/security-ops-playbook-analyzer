@@ -60,6 +60,7 @@ export function downloadReportPdf(incident: Incident | undefined, report: FinalR
         ${section('Root Cause', report.rootCause)}
         ${section('MITRE ATT&CK Mapping', report.mitreMapping)}
         ${section('Investigation Timeline', report.timeline)}
+        ${section('Agent Routing & Cycles', report.agentRouting)}
         ${section('Containment Actions', report.containmentActions)}
         ${section('Recommendations', report.recommendations)}
         ${section('Analyst Decisions', report.analystDecisions)}
@@ -78,6 +79,8 @@ export function buildRunExport(state: RunState) {
     threadId: state.threadId,
     incident: state.incident,
     checkpoints: state.checkpoints,
+    routes: state.routes,
+    agentRouting: state.routes,
     timeline: state.timeline,
     apiLogs: state.apiLogs,
     apiTransparencyLog: state.apiLogs,

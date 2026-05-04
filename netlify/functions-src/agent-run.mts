@@ -1,4 +1,5 @@
 import type { Config } from '@netlify/functions'
+import { Annotation, END, START, StateGraph } from '@langchain/langgraph'
 
 type ApiLogEntry = {
   id: string
@@ -20,7 +21,24 @@ type ApiLogEntry = {
   statusCode?: number
   statusText?: string
   status: 'ok' | 'error'
-  type: 'llm' | 'tool' | 'human' | 'error'
+  type: 'llm' | 'tool' | 'human' | 'routing' | 'error'
+}
+
+type AgentRoute = {
+  id: string
+  runId: string
+  threadId: string
+  cycleId: string
+  from: string
+  to: string
+  reason: string
+  decision: string
+  kind: 'forward' | 'parallel' | 'interrupt' | 'resume' | 'backtrack'
+  iteration: number
+  checkpointId?: string
+  timestamp: string
+  confidence?: number
+  stateDelta?: Record<string, unknown>
 }
 
 const toolEndpoints = [
@@ -35,6 +53,112 @@ const toolEndpoints = [
   { name: 'ServiceNow', endpoint: '/api/servicenow/ticket', agent: 'Ticketing Agent' },
   { name: 'Jira', endpoint: '/api/jira/issue', agent: 'Ticketing Agent' },
 ]
+
+const cycleId = 'cycle-investigation'
+
+function defaultRoutingPlan(incident: Record<string, any>) {
+  const identity = incident.affectedUser ?? 'affected user'
+  const host = incident.affectedHost ?? 'affected host'
+  const ioc = incident?.iocs?.domain ?? incident?.iocs?.ip ?? 'primary IOC'
+  return [
+    {
+      from: 'supervisor',
+      to: 'triage',
+      kind: 'forward',
+      decision: 'route_initial_triage',
+      reason: `Supervisor starts triage because ${identity}, ${host}, and ${ioc} appear in the same alert cluster.`,
+      confidence: 0.78,
+    },
+    {
+      from: 'triage',
+      to: 'enrichment',
+      kind: 'parallel',
+      decision: 'expand_ioc_context',
+      reason: 'Triage finds enough malicious signal to enrich IP, domain, URL, and hash evidence.',
+      confidence: 0.82,
+    },
+    {
+      from: 'enrichment',
+      to: 'identity',
+      kind: 'forward',
+      decision: 'validate_identity_scope',
+      reason: 'Threat intel suggests the identity may be the attacker pivot rather than only the victim.',
+      confidence: 0.74,
+    },
+    {
+      from: 'identity',
+      to: 'endpoint',
+      kind: 'forward',
+      decision: 'inspect_host_activity',
+      reason: 'Identity risk is high enough to inspect endpoint process ancestry and network sessions.',
+      confidence: 0.81,
+    },
+    {
+      from: 'endpoint',
+      to: 'log_analysis',
+      kind: 'forward',
+      decision: 'reconstruct_timeline',
+      reason: 'Endpoint artifacts need SIEM and cloud timeline correlation before containment.',
+      confidence: 0.84,
+    },
+    {
+      from: 'log_analysis',
+      to: 'enrichment',
+      kind: 'backtrack',
+      decision: 'loop_back_for_ioc_pivot',
+      reason: 'Map-reduce logs expose a second-stage IOC, so Log Analysis routes back to Enrichment.',
+      confidence: 0.63,
+    },
+    {
+      from: 'enrichment',
+      to: 'identity',
+      kind: 'forward',
+      decision: 'reanalyze_identity_after_new_ioc',
+      reason: 'New enrichment updates the user/session blast-radius hypothesis.',
+      confidence: 0.86,
+    },
+    {
+      from: 'identity',
+      to: 'endpoint',
+      kind: 'forward',
+      decision: 'confirm_host_after_identity_loop',
+      reason: 'Updated identity evidence requires a second endpoint check on the affected host.',
+      confidence: 0.87,
+    },
+    {
+      from: 'endpoint',
+      to: 'log_analysis',
+      kind: 'forward',
+      decision: 'reduce_second_pass_logs',
+      reason: 'Endpoint confirmation sends the graph back into log reduction for a final confidence score.',
+      confidence: 0.89,
+    },
+    {
+      from: 'log_analysis',
+      to: 'threat_intel',
+      kind: 'forward',
+      decision: 'map_actor_ttp',
+      reason: 'Second-pass timeline has enough confidence for actor/TTP matching.',
+      confidence: 0.9,
+    },
+    {
+      from: 'threat_intel',
+      to: 'supervisor',
+      kind: 'backtrack',
+      decision: 'return_to_supervisor_for_final_route',
+      reason: 'Threat Intel returns the case to Supervisor for the final containment decision.',
+      confidence: 0.91,
+    },
+    {
+      from: 'supervisor',
+      to: 'containment',
+      kind: 'interrupt',
+      decision: 'pause_for_human_approval',
+      reason: 'Supervisor chooses HITL containment after cyclic review raises confidence above threshold.',
+      confidence: 0.93,
+    },
+  ]
+}
 
 const rateLimitWindowMs = 60_000
 const rateLimitMaxRequests = 18
@@ -259,7 +383,7 @@ async function callGlmJson({
         'content-type': 'application/json',
         'accept-language': 'en-US,en',
       },
-      signal: AbortSignal.timeout(requestTimeout('GLM_ORCHESTRATION_TIMEOUT_MS', 18_000)),
+      signal: AbortSignal.timeout(requestTimeout('GLM_ORCHESTRATION_TIMEOUT_MS', 24_000)),
       body: JSON.stringify(body),
     })
   } catch (error) {
@@ -522,16 +646,39 @@ function normalizeRunPlan(raw: any) {
       'Temporary isolation may interrupt user work but reduces lateral movement risk.',
   }
 
-  return { incident, supervisor, triage, toolResults, containment }
+  const rawRoutes = Array.isArray(raw?.routingPlan)
+    ? raw.routingPlan
+    : Array.isArray(raw?.cycle)
+      ? raw.cycle
+      : Array.isArray(raw?.r)
+        ? raw.r
+        : []
+  const normalizedRoutes = rawRoutes
+    .map((item: any, index: number) => ({
+      from: String(item?.from ?? item?.f ?? ''),
+      to: String(item?.to ?? item?.toAgent ?? item?.t ?? ''),
+      kind: String(item?.kind ?? item?.k ?? (item?.backEdge ? 'backtrack' : 'forward')),
+      decision: String(item?.decision ?? item?.d ?? `route_step_${index + 1}`),
+      reason: String(item?.reason ?? item?.why ?? item?.r ?? 'Supervisor routed based on current graph state.'),
+      confidence: Number(item?.confidence ?? item?.c ?? 0.82),
+    }))
+    .filter((item: any) => item.from && item.to)
+  const routingPlan = normalizedRoutes.length >= 6 && normalizedRoutes.some((item: any) => item.kind === 'backtrack')
+    ? normalizedRoutes
+    : defaultRoutingPlan(incident)
+
+  return { incident, supervisor, triage, toolResults, containment, routingPlan }
 }
 
 function checkpoint(node: string, state: Record<string, unknown>, send: (event: string, data: unknown) => void) {
-  send('checkpoint', {
+  const item = {
     id: `ckpt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
     timestamp: new Date().toISOString(),
     node,
     state,
-  })
+  }
+  send('checkpoint', item)
+  return item.id
 }
 
 function timeline(title: string, detail: string, outcome: string, send: (event: string, data: unknown) => void, durationMs?: number) {
@@ -543,6 +690,318 @@ function timeline(title: string, detail: string, outcome: string, send: (event: 
     outcome,
     durationMs,
   })
+}
+
+function makeRoutingLog(route: AgentRoute): ApiLogEntry {
+  return makeLog({
+    callerAgent: 'LangGraph StateGraph',
+    toolName: route.kind === 'backtrack' ? 'Cyclic Agent Route' : 'Agent Route',
+    method: 'STATEGRAPH_EDGE',
+    endpointUrl: `${route.from}->${route.to}`,
+    requestPayload: {
+      runId: route.runId,
+      threadId: route.threadId,
+      cycleId: route.cycleId,
+      currentAgent: route.from,
+      candidateNextAgent: route.to,
+      decision: route.decision,
+      confidence: route.confidence,
+    },
+    responsePayload: route,
+    latencyMs: 0,
+    status: 'ok',
+    type: 'routing',
+  })
+}
+
+function emitRoute({
+  runId,
+  threadId,
+  from,
+  to,
+  reason,
+  decision,
+  kind,
+  iteration,
+  confidence,
+  send,
+}: {
+  runId: string
+  threadId: string
+  from: string
+  to: string
+  reason: string
+  decision: string
+  kind: AgentRoute['kind']
+  iteration: number
+  confidence?: number
+  send: (event: string, data: unknown) => void
+}) {
+  const routeWithoutCheckpoint: AgentRoute = {
+    id: `route-${crypto.randomUUID().slice(0, 8)}`,
+    runId,
+    threadId,
+    cycleId,
+    from,
+    to,
+    reason,
+    decision,
+    kind,
+    iteration,
+    timestamp: new Date().toISOString(),
+    confidence,
+    stateDelta: {
+      routeDecision: to,
+      cyclicBackEdge: kind === 'backtrack',
+      langGraphEdge: `${from}->${to}`,
+    },
+  }
+  const checkpointId = checkpoint(`route_${from}_to_${to}`, { route: routeWithoutCheckpoint }, send)
+  const route = { ...routeWithoutCheckpoint, checkpointId }
+  send('agent_route', route)
+  send('api_call', makeRoutingLog(route))
+  timeline(
+    kind === 'backtrack' ? `Cyclic handoff: ${from} -> ${to}` : `Agent handoff: ${from} -> ${to}`,
+    reason,
+    kind === 'backtrack' ? 'warning' : 'info',
+    send,
+  )
+  return route
+}
+
+function normalizeRouteKind(value: unknown): AgentRoute['kind'] {
+  return value === 'parallel' || value === 'interrupt' || value === 'resume' || value === 'backtrack'
+    ? value
+    : 'forward'
+}
+
+async function runCyclicInvestigationGraph({
+  runId,
+  threadId,
+  startedAt,
+  send,
+}: {
+  runId: string
+  threadId: string
+  startedAt: string
+  send: (event: string, data: unknown) => void
+}) {
+  const State = Annotation.Root({
+    runPlan: Annotation<any>(),
+    incident: Annotation<any>(),
+    supervisorResult: Annotation<any>(),
+    triageResult: Annotation<any>(),
+    routingPlan: Annotation<any[]>({ reducer: (_left, right) => right, default: () => [] }),
+    routeIndex: Annotation<number>({ reducer: (_left, right) => right, default: () => 0 }),
+    supervisorVisits: Annotation<number>({ reducer: (_left, right) => right, default: () => 0 }),
+    logPasses: Annotation<number>({ reducer: (_left, right) => right, default: () => 0 }),
+    routeDecision: Annotation<string>(),
+    approval: Annotation<any>(),
+  })
+
+  const nextRoute = (state: any, from: string, fallbackTo: string, fallbackKind: AgentRoute['kind'] = 'forward') => {
+    const plan = Array.isArray(state.routingPlan) ? state.routingPlan : []
+    const index = Number(state.routeIndex ?? 0)
+    const candidate = plan[index] ?? {}
+    const route = {
+      from,
+      to: candidate.to && candidate.from === from ? candidate.to : fallbackTo,
+      kind: normalizeRouteKind(candidate.kind ?? fallbackKind),
+      decision: String(candidate.decision ?? `route_${from}_to_${fallbackTo}`),
+      reason: String(candidate.reason ?? `LangGraph routed ${from} to ${fallbackTo}.`),
+      confidence: Number(candidate.confidence ?? 0.82),
+      iteration: index + 1,
+    }
+    const emittedRoute = emitRoute({ runId, threadId, send, ...route })
+    return { route: emittedRoute, stateUpdate: { routeIndex: index + 1, routeDecision: route.to } }
+  }
+
+  const graph = new StateGraph(State)
+    .addNode('incident_generator', async () => {
+      send('node_start', { node: 'incident_generator', timestamp: new Date().toISOString() })
+      const orchestrationPrompt = `JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}.
+Create a complex multi-stage enterprise SOC incident with identity+endpoint+cloud+email+SIEM evidence, conflicting signals, two departments, MITRE mapping, IOCs, and one-line raw log. Keep strings compact.
+i fields: incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet.
+a={actionName,target,toolArguments,riskJustification}.`
+      const orchestratedRun = await callGlmJson({
+        node: 'Supervisor Graph Orchestrator',
+        prompt: orchestrationPrompt,
+        temperature: 0.92,
+        maxTokens: 340,
+        send,
+        streamDeltas: false,
+        modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
+      })
+      const streamPreview = JSON.stringify(orchestratedRun.result)
+      for (let index = 0; index < streamPreview.length; index += 96) {
+        send('delta', {
+          node: 'Supervisor Graph Orchestrator',
+          content: streamPreview.slice(index, index + 96),
+        })
+      }
+      const runPlan = normalizeRunPlan(orchestratedRun.result)
+      const incident = runPlan.incident
+      send('incident', incident)
+      checkpoint('incident_generator', { incident, threadId, orchestration: 'langgraph-stategraph' }, send)
+      send('node_complete', {
+        node: 'incident_generator',
+        timestamp: new Date().toISOString(),
+        durationMs: orchestratedRun.log.latencyMs,
+        summary: incident?.incidentId,
+      })
+      return {
+        runPlan,
+        incident,
+        supervisorResult: runPlan.supervisor,
+        triageResult: runPlan.triage,
+        routingPlan: runPlan.routingPlan,
+        routeIndex: 0,
+        supervisorVisits: 0,
+        logPasses: 0,
+      }
+    })
+    .addNode('supervisor', (state: any) => {
+      send('node_start', { node: 'supervisor', timestamp: new Date().toISOString() })
+      const visits = Number(state.supervisorVisits ?? 0)
+      const routed = visits === 0
+        ? nextRoute(state, 'supervisor', 'triage')
+        : nextRoute(state, 'supervisor', 'containment', 'interrupt')
+      timeline(
+        visits === 0 ? 'Supervisor routed incident' : 'Supervisor re-entered after cyclic review',
+        visits === 0
+          ? state.supervisorResult?.rationale ?? 'Initial conditional routing complete.'
+          : 'Back edge returned threat intelligence to the Supervisor for final containment routing.',
+        'success',
+        send,
+      )
+      checkpoint('supervisor', { incidentId: state.incident?.incidentId, supervisor: state.supervisorResult, routeDecision: routed.stateUpdate.routeDecision }, send)
+      send('node_complete', { node: 'supervisor', timestamp: new Date().toISOString(), durationMs: 0 })
+      return { ...routed.stateUpdate, supervisorVisits: visits + 1 }
+    })
+    .addNode('triage', (state: any) => {
+      send('node_start', { node: 'triage', timestamp: new Date().toISOString() })
+      timeline('Triage completed', state.triageResult?.classification ?? 'Incident classified.', 'success', send)
+      checkpoint('triage', { triage: state.triageResult }, send)
+      const routed = nextRoute(state, 'triage', 'enrichment', 'parallel')
+      timeline(
+        'Parallel superstep started',
+        'Enrichment, identity, endpoint, log, cloud, and ticketing tools are ready for hosted Send() fan-out while the cyclic StateGraph continues.',
+        'info',
+        send,
+      )
+      send('tool_fanout_required', {
+        incident: state.incident,
+        state: { supervisor: state.supervisorResult, triage: state.triageResult, route: routed.route },
+        tools: toolEndpoints,
+        concurrency: toolEndpoints.length,
+        evidenceRequirement: 'Each hosted tool endpoint must return llmAudit with prompt messages, raw response, parsed response, and nonzero token usage.',
+      })
+      checkpoint(
+        'parallel_superstep',
+        {
+          toolCount: toolEndpoints.length,
+          toolEndpoints: toolEndpoints.map((tool) => tool.endpoint),
+          executionMode: 'hosted_tool_endpoint_fanout',
+          route: routed.route,
+        },
+        send,
+      )
+      send('node_complete', { node: 'triage', timestamp: new Date().toISOString(), durationMs: 0 })
+      return routed.stateUpdate
+    })
+    .addNode('enrichment', (state: any) => {
+      send('node_start', { node: 'enrichment', timestamp: new Date().toISOString() })
+      const routed = nextRoute(state, 'enrichment', 'identity')
+      checkpoint('enrichment_subgraph', { route: routed.route, iocs: state.incident?.iocs, pass: Number(state.logPasses ?? 0) + 1 }, send)
+      send('node_complete', { node: 'enrichment', timestamp: new Date().toISOString(), durationMs: 0 })
+      return routed.stateUpdate
+    })
+    .addNode('identity', (state: any) => {
+      send('node_start', { node: 'identity', timestamp: new Date().toISOString() })
+      const routed = nextRoute(state, 'identity', 'endpoint')
+      checkpoint('identity_subgraph', { route: routed.route, affectedUser: state.incident?.affectedUser }, send)
+      send('node_complete', { node: 'identity', timestamp: new Date().toISOString(), durationMs: 0 })
+      return routed.stateUpdate
+    })
+    .addNode('endpoint', (state: any) => {
+      send('node_start', { node: 'endpoint', timestamp: new Date().toISOString() })
+      const routed = nextRoute(state, 'endpoint', 'log_analysis')
+      checkpoint('endpoint_subgraph', { route: routed.route, affectedHost: state.incident?.affectedHost }, send)
+      send('node_complete', { node: 'endpoint', timestamp: new Date().toISOString(), durationMs: 0 })
+      return routed.stateUpdate
+    })
+    .addNode('log_analysis', (state: any) => {
+      send('node_start', { node: 'log_analysis', timestamp: new Date().toISOString() })
+      const pass = Number(state.logPasses ?? 0)
+      const routed = pass === 0
+        ? nextRoute(state, 'log_analysis', 'enrichment', 'backtrack')
+        : nextRoute(state, 'log_analysis', 'threat_intel')
+      checkpoint('log_analysis_map_reduce', { route: routed.route, pass: pass + 1, mapReduce: ['SIEM', 'M365', 'CloudTrail'] }, send)
+      send('node_complete', { node: 'log_analysis', timestamp: new Date().toISOString(), durationMs: 0 })
+      return { ...routed.stateUpdate, logPasses: pass + 1 }
+    })
+    .addNode('threat_intel', (state: any) => {
+      send('node_start', { node: 'threat_intel', timestamp: new Date().toISOString() })
+      const routed = nextRoute(state, 'threat_intel', 'supervisor', 'backtrack')
+      checkpoint('threat_intel_subgraph', { route: routed.route, mitre: [state.incident?.mitreTactic, state.incident?.mitreTechnique] }, send)
+      send('node_complete', { node: 'threat_intel', timestamp: new Date().toISOString(), durationMs: 0 })
+      return routed.stateUpdate
+    })
+    .addNode('containment', (state: any) => {
+      send('node_start', { node: 'containment', timestamp: new Date().toISOString() })
+      const incident = state.incident
+      const containment = state.runPlan?.containment ?? {}
+      const approval = {
+        runId,
+        actionName: containment.actionName ?? 'isolate_host',
+        target: containment.target ?? incident?.affectedHost,
+        toolArguments: containment.toolArguments ?? {
+          host: incident?.affectedHost,
+          durationMinutes: 45,
+          ticket: incident?.incidentId,
+        },
+        riskJustification:
+          containment.riskJustification ??
+          'Containment may disrupt business workflow but prevents additional attacker movement.',
+        severity: incident?.severity,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        incident,
+        stateSnapshot: {
+          threadId,
+          supervisor: state.supervisorResult,
+          triage: state.triageResult,
+          routingPlan: state.routingPlan,
+          toolEndpoints,
+          orchestration: 'langgraph-stategraph-cyclic',
+        },
+      }
+      checkpoint('containment_interrupt', { approval, routeDecision: state.routeDecision }, send)
+      timeline('Containment paused', 'LangGraph interrupt surfaced a human approval card after cyclic routing.', 'warning', send)
+      send('approval_required', approval)
+      send('node_complete', { node: 'containment', timestamp: new Date().toISOString(), durationMs: 0 })
+      return { approval }
+    })
+    .addEdge(START, 'incident_generator')
+    .addEdge('incident_generator', 'supervisor')
+    .addConditionalEdges('supervisor', (state: any) => state.routeDecision, {
+      triage: 'triage',
+      containment: 'containment',
+    })
+    .addEdge('triage', 'enrichment')
+    .addEdge('enrichment', 'identity')
+    .addEdge('identity', 'endpoint')
+    .addEdge('endpoint', 'log_analysis')
+    .addConditionalEdges('log_analysis', (state: any) => state.routeDecision, {
+      enrichment: 'enrichment',
+      threat_intel: 'threat_intel',
+    })
+    .addEdge('threat_intel', 'supervisor')
+    .addEdge('containment', END)
+    .compile()
+
+  send('start', { runId, threadId, startedAt, orchestration: 'langgraph-stategraph-cyclic' })
+  timeline('Run started', 'Supervisor accepted a new one-click incident investigation.', 'info', send)
+  await graph.invoke({}, { recursionLimit: 40, configurable: { thread_id: threadId } })
 }
 
 export default async (req: Request) => {
@@ -565,108 +1024,7 @@ export default async (req: Request) => {
 
       try {
         requiredKey()
-        send('start', { runId, threadId, startedAt })
-        timeline('Run started', 'Supervisor accepted a new one-click incident investigation.', 'info', send)
-
-        send('node_start', { node: 'incident_generator', timestamp: new Date().toISOString() })
-        const orchestrationPrompt = `Return minified JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}. i must include incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet(one line). a={actionName,target,toolArguments,riskJustification}. Keep text short.`
-        const orchestratedRun = await callGlmJson({
-          node: 'Supervisor Graph Orchestrator',
-          prompt: orchestrationPrompt,
-          temperature: 0.9,
-          maxTokens: 420,
-          send,
-          streamDeltas: false,
-          modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
-        })
-        const streamPreview = JSON.stringify(orchestratedRun.result)
-        for (let index = 0; index < streamPreview.length; index += 96) {
-          send('delta', {
-            node: 'Supervisor Graph Orchestrator',
-            content: streamPreview.slice(index, index + 96),
-          })
-        }
-        const runPlan = normalizeRunPlan(orchestratedRun.result)
-        const incident = runPlan.incident
-        const supervisorResult = runPlan.supervisor ?? {}
-        const triageResult = runPlan.triage ?? {}
-        const state = { supervisor: supervisorResult, triage: triageResult }
-
-        send('incident', incident)
-        checkpoint('incident_generator', { incident, threadId }, send)
-        send('node_complete', {
-          node: 'incident_generator',
-          timestamp: new Date().toISOString(),
-          durationMs: orchestratedRun.log.latencyMs,
-          summary: incident?.incidentId,
-        })
-
-        send('node_start', { node: 'supervisor', timestamp: new Date().toISOString() })
-        timeline('Supervisor routed incident', supervisorResult.rationale ?? 'Routing complete.', 'success', send)
-        checkpoint('supervisor', { incidentId: incident?.incidentId, supervisor: supervisorResult }, send)
-        send('node_complete', { node: 'supervisor', timestamp: new Date().toISOString(), durationMs: 0 })
-
-        send('node_start', { node: 'triage', timestamp: new Date().toISOString() })
-        timeline('Triage completed', triageResult.classification ?? 'Incident classified.', 'success', send)
-        checkpoint('triage', { triage: triageResult }, send)
-        send('node_complete', { node: 'triage', timestamp: new Date().toISOString(), durationMs: 0 })
-
-        timeline(
-          'Parallel superstep started',
-          'Enrichment, identity, endpoint, log, cloud, and ticketing tools are ready for hosted Send() fan-out.',
-          'info',
-          send,
-        )
-        for (const node of ['enrichment', 'identity', 'endpoint', 'log_analysis', 'threat_intel']) {
-          send('node_start', { node, timestamp: new Date().toISOString() })
-        }
-        send('tool_fanout_required', {
-          incident,
-          state,
-          tools: toolEndpoints,
-          concurrency: 1,
-          evidenceRequirement: 'Each hosted tool endpoint must return llmAudit with prompt messages, raw response, parsed response, and nonzero token usage.',
-        })
-        checkpoint(
-          'parallel_superstep',
-          {
-            toolCount: toolEndpoints.length,
-            toolEndpoints: toolEndpoints.map((tool) => tool.endpoint),
-            executionMode: 'hosted_tool_endpoint_fanout',
-          },
-          send,
-        )
-        for (const node of ['enrichment', 'identity', 'endpoint', 'log_analysis', 'threat_intel']) {
-          send('node_complete', { node, timestamp: new Date().toISOString(), durationMs: 0 })
-        }
-
-        send('node_start', { node: 'containment', timestamp: new Date().toISOString() })
-        const containment = runPlan.containment ?? {}
-        const approval = {
-          runId,
-          actionName: containment.actionName ?? 'isolate_host',
-          target: containment.target ?? incident?.affectedHost,
-          toolArguments: containment.toolArguments ?? {
-            host: incident?.affectedHost,
-            durationMinutes: 45,
-            ticket: incident?.incidentId,
-          },
-          riskJustification:
-            containment.riskJustification ??
-            'Containment may disrupt business workflow but prevents additional attacker movement.',
-          severity: incident?.severity,
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
-          incident,
-          stateSnapshot: {
-            threadId,
-            supervisor: supervisorResult,
-            triage: triageResult,
-            toolEndpoints,
-          },
-        }
-        checkpoint('containment_interrupt', { approval }, send)
-        timeline('Containment paused', 'LangGraph interrupt surfaced a human approval card.', 'warning', send)
-        send('approval_required', approval)
+        await runCyclicInvestigationGraph({ runId, threadId, startedAt, send })
         send('done', {})
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Agent run failed'

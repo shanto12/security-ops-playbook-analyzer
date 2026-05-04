@@ -8,6 +8,10 @@ const screenshotPaths = {
   initial: `${screenshotPrefix}-01-initial.png`,
   approval: `${screenshotPrefix}-02-approval-waiting-tools.png`,
   tools: `${screenshotPrefix}-03-tool-llm-evidence.png`,
+  handoffGraph: `${screenshotPrefix}-03a-cyclic-graph.png`,
+  handoffTrace: `${screenshotPrefix}-03b-cyclic-handoff-trace.png`,
+  handoffCheckpoint: `${screenshotPrefix}-03c-handoff-checkpoint-state.png`,
+  handoffApi: `${screenshotPrefix}-03d-routing-api-evidence.png`,
   report: `${screenshotPrefix}-04-final-report.png`,
   replay: `${screenshotPrefix}-05-replay-proof.png`,
 }
@@ -17,6 +21,7 @@ const requiredReportSections = [
   'Root Cause',
   'MITRE Mapping',
   'Investigation Timeline',
+  'Agent Routing & Cycles',
   'Containment Actions',
   'Recommendations',
   'Analyst Decisions',
@@ -61,6 +66,37 @@ await page.waitForFunction(
   { timeout: 30_000 },
 )
 await page.screenshot({ path: screenshotPaths.tools, fullPage: true })
+
+await page.waitForSelector('[data-testid="handoff-trace"]', { timeout: 30_000 })
+await page.waitForSelector('[data-testid="handoff-row"][data-kind="backtrack"]', { timeout: 30_000 })
+const routeRows = await page.$$eval('[data-testid="handoff-row"]', (items) =>
+  items.map((item) => ({
+    text: item.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+    from: item.getAttribute('data-from') ?? '',
+    to: item.getAttribute('data-to') ?? '',
+    kind: item.getAttribute('data-kind') ?? '',
+  })),
+)
+const backtrackRows = routeRows.filter((row) => row.kind === 'backtrack')
+if (routeRows.length < 8) throw new Error(`Expected at least 8 cyclic handoff rows, found ${routeRows.length}`)
+if (backtrackRows.length < 1) throw new Error('No cyclic backtrack handoff row was visible')
+if (!backtrackRows.some((row) => row.to === 'supervisor')) {
+  throw new Error(`Expected at least one backtrack returning to supervisor, got ${JSON.stringify(backtrackRows)}`)
+}
+await page.screenshot({ path: screenshotPaths.handoffGraph, fullPage: true })
+await page.locator('[data-testid="handoff-trace"]').screenshot({ path: screenshotPaths.handoffTrace })
+const cycleCheckpoint = page.locator('[data-testid="checkpoint-row"][data-node*="route_"]').first()
+await cycleCheckpoint.locator('summary').click().catch(() => undefined)
+await page.screenshot({ path: screenshotPaths.handoffCheckpoint, fullPage: true })
+await page.locator('.apiLog select').selectOption('routing')
+const routingRows = await page.$$eval('details.apiRow.routing summary', (items) =>
+  items.map((item) => item.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+)
+if (routingRows.length < routeRows.length) {
+  throw new Error(`Expected routing API rows for every handoff. rows=${routingRows.length}, handoffs=${routeRows.length}`)
+}
+await page.screenshot({ path: screenshotPaths.handoffApi, fullPage: true })
+await page.locator('.apiLog select').selectOption('all')
 
 await approve.click()
 const finalReport = page.locator('#final-report')
@@ -118,6 +154,9 @@ Result: PASS. The deployed app completed incident generation, ten LLM-backed ent
 
 Evidence:
 - Approval disabled before tool evidence completed: ${approvalDisabledBeforeTools ? 'yes' : 'no'}
+- Cyclic handoff rows visible: ${routeRows.length}
+- Cyclic backtrack rows visible: ${backtrackRows.length}
+- Routing API rows visible: ${routingRows.length}
 - Tool rows with nonzero tokens: ${toolRows.length}
 - Reporting Agent LLM rows visible: ${reportRows.length}
 - Failed API Transparency Log rows: 0
@@ -127,6 +166,10 @@ Screenshot artifacts:
 - Initial live app: ${screenshotPaths.initial}
 - Approval card waiting for tool evidence: ${screenshotPaths.approval}
 - Ten LLM-backed tool rows visible: ${screenshotPaths.tools}
+- Cyclic graph state: ${screenshotPaths.handoffGraph}
+- Cyclic handoff trace: ${screenshotPaths.handoffTrace}
+- Handoff checkpoint state: ${screenshotPaths.handoffCheckpoint}
+- Routing API evidence: ${screenshotPaths.handoffApi}
 - Final report rendered: ${screenshotPaths.report}
 - Replay proof after checkpoint fork: ${screenshotPaths.replay}
 
@@ -139,6 +182,12 @@ Visible tool rows:
 |---|---:|
 ${toolRows.map((row) => `| ${row.text.replaceAll('|', '\\|')} | ${row.tokens} |`).join('\n')}
 
+Cyclic handoff evidence:
+
+| From | To | Kind | Visible text |
+|---|---|---|---|
+${routeRows.map((row) => `| ${row.from} | ${row.to} | ${row.kind} | ${row.text.replaceAll('|', '\\|')} |`).join('\n')}
+
 Reporting rows:
 ${reportRows.map((row) => `- ${row}`).join('\n')}
 
@@ -149,4 +198,4 @@ Verification window:
 
 await browser.close()
 await writeFile(outputPath, markdown)
-console.log(JSON.stringify({ outputPath, screenshotPaths, toolRows: toolRows.length, reportRows: reportRows.length, failedRows: 0, finishedAt }, null, 2))
+console.log(JSON.stringify({ outputPath, screenshotPaths, toolRows: toolRows.length, reportRows: reportRows.length, routeRows: routeRows.length, backtrackRows: backtrackRows.length, failedRows: 0, finishedAt }, null, 2))
