@@ -1,0 +1,91 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/virustotal/lookup"
+  to = "/.netlify/functions/tool-gateway?tool=virustotal"
+  status = 200
+
+[[redirects]]
+  from = "/api/abuseipdb/check"
+  to = "/.netlify/functions/tool-gateway?tool=abuseipdb"
+  status = 200
+
+[[redirects]]
+  from = "/api/activedirectory/user"
+  to = "/.netlify/functions/tool-gateway?tool=activedirectory"
+  status = 200
+
+[[redirects]]
+  from = "/api/servicenow/ticket"
+  to = "/.netlify/functions/tool-gateway?tool=servicenow"
+  status = 200
+
+[[redirects]]
+  from = "/api/jira/issue"
+  to = "/.netlify/functions/tool-gateway?tool=jira"
+  status = 200
+
+[[redirects]]
+  from = "/api/siem/search"
+  to = "/.netlify/functions/tool-gateway?tool=siem"
+  status = 200
+
+[[redirects]]
+  from = "/api/shodan/host"
+  to = "/.netlify/functions/tool-gateway?tool=shodan"
+  status = 200
+
+[[redirects]]
+  from = "/api/firewall/block"
+  to = "/.netlify/functions/tool-gateway?tool=firewall"
+  status = 200
+
+[[redirects]]
+  from = "/api/edr/endpoint"
+  to = "/.netlify/functions/tool-gateway?tool=edr"
+  status = 200
+
+[[redirects]]
+  from = "/api/slack/notify"
+  to = "/.netlify/functions/tool-gateway?tool=slack"
+  status = 200
+
+[[redirects]]
+  from = "/api/whois/lookup"
+  to = "/.netlify/functions/tool-gateway?tool=whois"
+  status = 200
+
+[[redirects]]
+  from = "/api/okta/user-risk"
+  to = "/.netlify/functions/tool-gateway?tool=okta"
+  status = 200
+
+[[redirects]]
+  from = "/api/m365/audit"
+  to = "/.netlify/functions/tool-gateway?tool=m365"
+  status = 200
+
+[[redirects]]
+  from = "/api/cloudtrail/search"
+  to = "/.netlify/functions/tool-gateway?tool=cloudtrail"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "DENY"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

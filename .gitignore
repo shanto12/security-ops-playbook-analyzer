@@ -1,0 +1,12 @@
+node_modules
+dist
+.netlify
+.env
+.env.*
+!.env.example
+coverage
+playwright-report
+test-results
+.playwright-cli
+*.log
+.DS_Store
