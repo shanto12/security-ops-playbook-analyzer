@@ -145,6 +145,9 @@ function requiredKey() {
 function fireworksKey() {
   return envValue("FIREWORKS_API_KEY");
 }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 async function callFireworksJson({
   node,
   prompt,
@@ -512,16 +515,16 @@ function toolUserPrompt(tool, incident, state) {
   });
 }
 async function callToolLlm(tool, incident, state) {
-  const provider = "z.ai";
-  const apiKey = requiredKey();
-  const model = envValue("GLM_TOOL_MODEL") || "glm-5-turbo";
-  const baseUrl = envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
+  const provider = fireworksKey() ? "fireworks" : "z.ai";
+  const apiKey = provider === "fireworks" ? fireworksKey() : requiredKey();
+  const model = provider === "fireworks" ? envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro" : envValue("GLM_TOOL_MODEL") || "glm-5-turbo";
+  const baseUrl = provider === "fireworks" ? envValue("FIREWORKS_BASE_URL") || "https://api.fireworks.ai/inference/v1" : envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
   const endpointPath = "/chat/completions";
   const requestBody = {
     model,
-    thinking: { type: "disabled" },
+    ...provider === "fireworks" ? { reasoning_effort: "none" } : { thinking: { type: "disabled" } },
     temperature: 0.76,
-    max_tokens: 260,
+    max_tokens: 180,
     stream: false,
     response_format: { type: "json_object" },
     messages: [
@@ -537,7 +540,7 @@ async function callToolLlm(tool, incident, state) {
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
-        "accept-language": "en-US,en"
+        ...provider === "z.ai" ? { "accept-language": "en-US,en" } : {}
       },
       body: JSON.stringify(requestBody)
     });
@@ -780,13 +783,22 @@ data: ${JSON.stringify(data)}
         for (const node of ["enrichment", "identity", "endpoint", "log_analysis", "threat_intel"]) {
           send("node_start", { node, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         }
-        const toolResults = await Promise.all(
-          toolEndpoints.map(async (tool) => {
-            const result = await callToolLlm(tool, incident, state);
-            send("api_call", result.log);
-            return result;
-          })
-        );
+        const toolResults = [];
+        for (let index = 0; index < toolEndpoints.length; index += 2) {
+          const batch = toolEndpoints.slice(index, index + 2);
+          const batchResults = await Promise.all(
+            batch.map(async (tool) => {
+              let result = await callToolLlm(tool, incident, state);
+              if (result.log.status !== "ok" || !result.log.tokenCount) {
+                await sleep(900);
+                result = await callToolLlm(tool, incident, state);
+              }
+              send("api_call", result.log);
+              return result;
+            })
+          );
+          toolResults.push(...batchResults);
+        }
         checkpoint(
           "parallel_superstep",
           {
