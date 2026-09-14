@@ -278,7 +278,7 @@ async function modelReport(prompt: unknown, send: (event: string, data: unknown)
     messages: [
       {
         role: 'system',
-        content: 'Return compact valid JSON only for a SOC incident report. No markdown.',
+        content: 'Return compact valid JSON only for a synthetic SOC exercise report. No markdown. All containment, tickets, and notifications are simulated; never claim real system changes or message delivery.',
       },
       { role: 'user', content: JSON.stringify(prompt) },
     ],

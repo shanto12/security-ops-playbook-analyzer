@@ -12,9 +12,10 @@ const baseUrl = process.env.VERIFY_URL || 'https://security-ops-playbook-analyze
 const output = process.env.VERIFY_OUTPUT || '/Users/shanto/Documents/Playground/portfolio-curation-2026-09-14/soc'
 const prefix = live ? 'production' : 'read-only'
 const localTime = () => new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'long' }).format(new Date())
-const evidence = { baseUrl, mode: live ? 'bounded live production' : 'read-only production', started: localTime(), manualChrome: 'NOT TESTED: parent coordinator owns real Chrome', checks: [], requests: [], errors: [], controls: [], paidRequestCap: 15, livePostCount: 0 }
+const evidence = { deploymentId: process.env.VERIFY_DEPLOY_ID, sourceCommit: process.env.VERIFY_COMMIT, baseUrl, mode: live ? 'bounded live production' : 'read-only production', started: localTime(), manualChrome: 'NOT TESTED: parent coordinator owns real Chrome', checks: [], requests: [], errors: [], controls: [], paidRequestCap: 15, livePostCount: 0 }
 const fixtures = new Map()
 const captureTasks = []
+let partialWrite = Promise.resolve()
 const endpointCalls = new Map()
 const editedHost = 'SOC-VERIFY-EDITED-HOST'
 const toolPaths = ['/api/virustotal/lookup', '/api/abuseipdb/check', '/api/activedirectory/user', '/api/okta/user-risk', '/api/edr/endpoint', '/api/siem/search', '/api/m365/audit', '/api/cloudtrail/search', '/api/servicenow/ticket', '/api/jira/issue']
@@ -46,6 +47,48 @@ evidence.browserVersion = browser.version()
 async function makePage(label, viewport, reuse = false, injectError = false, retryFixture = false) {
   let failedToolInjected = false
   const context = await browser.newContext({ viewport, acceptDownloads: true, timezoneId: 'America/Chicago', reducedMotion: 'reduce' })
+  await context.exposeBinding('__verifyResponse', async (_source, captured) => {
+    const { path, body, complete } = captured
+    const fixtureInput = reuse && (path === '/api/agent-run' || toolPaths.includes(path))
+    const source = retryFixture && fixtureInput ? 'injected tool failure / captured recovery fixture' : fixtureInput ? 'captured production input replayed locally' : injectError ? 'injected error fixture' : 'live production'
+    let entry = evidence.requests.find(item => item.label === label && item.captureId === captured.captureId)
+    if (!entry) { entry = { label, ...captured, source, captureMethod: 'in-page fetch response clone, same network request' }; evidence.requests.push(entry) }
+    else Object.assign(entry, captured)
+    if (label === 'desktop-live') fixtures.set(path, { status: captured.status, contentType: captured.contentType, body })
+    if (complete) console.log(`RESPONSE: ${label} ${captured.method} ${path} ${captured.status} (${body.length} bytes)`)
+    if (captured.captureError) evidence.errors.push({ label, type: 'fetch-clone-capture', path, text: captured.captureError })
+    partialWrite = partialWrite.then(() => writeFile(join(output, `${prefix}-evidence.partial.json`), JSON.stringify(evidence, null, 2)))
+    captureTasks.push(partialWrite)
+  })
+  await context.addInitScript(() => {
+    const originalFetch = window.fetch.bind(window)
+    let captureId = 0
+    window.fetch = async (...args) => {
+      const response = await originalFetch(...args)
+      const request = args[0]
+      const path = new URL(typeof request === 'string' || request instanceof URL ? String(request) : request.url, location.href).pathname
+      if (path.startsWith('/api/')) {
+        const record = { captureId: ++captureId, path, method: args[1]?.method || (request instanceof Request ? request.method : 'GET'), status: response.status, contentType: response.headers.get('content-type'), body: '', complete: false }
+        const clone = response.clone()
+        void (async () => {
+          const reader = clone.body.getReader()
+          const decoder = new TextDecoder()
+          try {
+            for (;;) {
+              const { value, done } = await reader.read()
+              if (done) break
+              record.body += decoder.decode(value, { stream: true })
+              await window.__verifyResponse(record)
+            }
+            record.body += decoder.decode()
+            record.complete = true
+          } catch (error) { record.captureError = String(error) }
+          await window.__verifyResponse(record)
+        })()
+      }
+      return response
+    }
+  })
   const page = await context.newPage()
   page.on('console', message => { if (message.type() === 'error') evidence.errors.push({ label, type: 'console', text: message.text() }) })
   page.on('pageerror', error => evidence.errors.push({ label, type: 'pageerror', text: error.message }))
@@ -53,14 +96,6 @@ async function makePage(label, viewport, reuse = false, injectError = false, ret
   page.on('response', response => {
     const path = new URL(response.url()).pathname
     if (response.status() >= 400) evidence.errors.push({ label, type: 'http', path, status: response.status() })
-    if (!path.startsWith('/api/')) return
-    captureTasks.push((async () => {
-      const body = await response.text()
-      const fixtureInput = reuse && (path === '/api/agent-run' || toolPaths.includes(path))
-      const entry = { label, path, method: response.request().method(), status: response.status(), source: retryFixture && fixtureInput ? 'injected tool failure / captured recovery fixture' : fixtureInput ? 'captured production input replayed locally' : injectError ? 'injected error fixture' : 'live production', body }
-      evidence.requests.push(entry)
-      if (label === 'desktop-live' && !fixtures.has(path)) fixtures.set(path, { status: response.status(), contentType: response.headers()['content-type'], body })
-    })().catch(error => evidence.errors.push({ label, type: 'capture', path, text: error.message })))
   })
   await page.route('**/api/**', async route => {
     const request = route.request()
@@ -86,6 +121,7 @@ async function makePage(label, viewport, reuse = false, injectError = false, ret
     }
     endpointCalls.set(path, current + 1)
     evidence.livePostCount += 1
+    console.log(`LIVE REQUEST ${evidence.livePostCount}/${evidence.paidRequestCap}: ${label} ${path}`)
     return route.continue()
   })
   await page.goto(baseUrl, { waitUntil: 'networkidle' })
@@ -130,9 +166,13 @@ async function start(page, onboarding = false) {
 }
 async function readyApproval(page, label) {
   const approve = page.getByRole('button', { name: /^Approve$/i })
-  await approve.waitFor({ timeout: 180_000 })
+  await page.waitForFunction(() => document.querySelector('.errorBanner') || [...document.querySelectorAll('button')].some(button => /^Approve$/i.test(button.textContent.trim())), null, { timeout: 90_000 })
+  if (await page.locator('.errorBanner').count()) throw new Error(`${label}: ${await page.locator('.errorBanner').innerText()}`)
   const initiallyDisabled = await approve.isDisabled()
-  await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => /^Approve$/i.test(button.textContent.trim()) && !button.disabled), null, { timeout: 300_000 })
+  await page.screenshot({ path: join(output, `${prefix}-${label}-active-viewport.png`), fullPage: false })
+  await screenshot(page, `${label}-active`)
+  await page.waitForFunction(() => document.querySelector('.errorBanner') || [...document.querySelectorAll('button')].some(button => /^Approve$/i.test(button.textContent.trim()) && !button.disabled), null, { timeout: 180_000 })
+  if (await page.locator('.errorBanner').count()) throw new Error(`${label}: ${await page.locator('.errorBanner').innerText()}`)
   await Promise.allSettled(captureTasks)
   record(`${label}: analyst approval ready`, 'isolated Playwright + live/captured SSE', { initiallyDisabled, screenshot: await screenshot(page, `${label}-approval`) })
 }
@@ -158,6 +198,7 @@ async function reportAndExport(page, label) {
   assert(!events.some(item => item.event === 'error'), 'Backend emitted an error')
   const log = events.find(item => item.event === 'api_call' && item.data.callerAgent === 'Reporting Agent' && item.data.type === 'llm')?.data
   record(`${label}: report and JSON export`, 'isolated Playwright + live production SSE', { audit: validateModel(log, `${label} report`), export: path, screenshot: await screenshot(page, `${label}-report`) })
+  await page.screenshot({ path: join(output, `${prefix}-${label}-report-viewport.png`), fullPage: false })
   return exported
 }
 try {
@@ -176,7 +217,7 @@ try {
     assert.equal(response.status, 405, `${path}: GET should reject without paid work`)
   }
   record('API method validation', 'production API; no paid request', 'GET rejected with 405 on all execution endpoints')
-  const desktop = await makePage(live ? 'desktop-live' : 'desktop-read-only', { width: 1440, height: 1000 })
+  const desktop = await makePage(live ? 'desktop-live' : 'desktop-read-only', { width: 1440, height: 900 })
   await layout(desktop, 'desktop-initial')
   await tabs(desktop, 'desktop-initial')
   const brand = desktop.getByRole('link', { name: /Sentinel investigation workspace/i })
@@ -188,16 +229,20 @@ try {
   const mobile = await makePage('mobile-read-only', { width: 390, height: 844 })
   await layout(mobile, 'mobile-initial')
   await tabs(mobile, 'mobile-initial')
+  await mobile.context().close()
   record('Auth and password manager', 'source/UI inventory', 'N/A: public synthetic demo has no account or auth workflow', 'NOT APPLICABLE')
-  const errorPage = await makePage('injected-error', { width: 1440, height: 1000 }, false, true)
+  const errorPage = await makePage('injected-error', { width: 1440, height: 900 }, false, true)
   await start(errorPage, true)
   await errorPage.getByText('Verification fixture: provider temporarily unavailable', { exact: false }).waitFor()
   assert.equal(await errorPage.getByRole('button', { name: /Generate Incident/i }).isEnabled(), true, 'Generation must be available after a provider failure')
   record('Provider error is visible', 'isolated Playwright with explicitly injected failure', { screenshot: await screenshot(errorPage, 'injected-error') })
+  await errorPage.context().close()
   if (live) {
     await start(desktop)
     await readyApproval(desktop, 'desktop-live')
     const initial = sse(fixtures.get('/api/agent-run').body)
+    record('Initial SSE terminal state', 'in-page clone of real production response', { terminalDone: initial.some(item => item.event === 'done'), eventCount: initial.length, transportErrors: evidence.errors.filter(item => item.url?.endsWith('/api/agent-run') || item.path === '/api/agent-run') })
+    assert(initial.some(item => item.event === 'done'), 'Initial generation response did not include terminal done event')
     const incidentAudit = initial.find(item => item.event === 'api_call' && item.data.type === 'llm')?.data
     const auditRows = [validateModel(incidentAudit, 'incident generation')]
     for (const path of toolPaths) auditRows.push(validateModel(JSON.parse(fixtures.get(path).body).llmAudit, path))
@@ -220,6 +265,11 @@ try {
     await reveal(desktop, /investigation|overview/i)
     await desktop.getByRole('button', { name: /^Approve$/i }).click()
     await reportAndExport(desktop, 'desktop-live')
+    await reveal(desktop, /execution graph/i)
+    await desktop.locator('.graphPanel').scrollIntoViewIfNeeded()
+    await desktop.screenshot({ path: join(output, `${prefix}-completed-graph-viewport.png`), fullPage: false })
+    await screenshot(desktop, 'completed-graph')
+    await reveal(desktop, /report/i)
     const popupPromise = desktop.waitForEvent('popup')
     await desktop.locator('#final-report').getByRole('button', { name: /PDF/i }).click()
     const popup = await popupPromise
@@ -242,9 +292,10 @@ try {
     const replayEvents = sse(replayResponse.body)
     assert(!replayEvents.some(item => item.event === 'error'))
     record('Snapshot alternate analysis', 'isolated Playwright + live production SSE; browser snapshot supplied to model, not native checkpoint resume', { audit: validateModel(replayEvents.find(item => item.event === 'api_call' && item.data.type === 'llm')?.data, 'replay'), screenshot: await screenshot(desktop, 'replay') })
+    await desktop.context().close()
     for (const decision of ['reject', 'edit']) {
       const label = `${decision}-live-resume`
-      const page = await makePage(label, decision === 'edit' ? { width: 390, height: 844 } : { width: 1440, height: 1000 }, true)
+      const page = await makePage(label, decision === 'edit' ? { width: 390, height: 844 } : { width: 1440, height: 900 }, true)
       await start(page)
       await readyApproval(page, label)
       if (decision === 'edit') {
@@ -291,6 +342,7 @@ try {
       const reportShortcut = page.getByRole('button', { name: /Read the report/i })
       if (await reportShortcut.count()) await reportShortcut.click()
       await layout(page, `${label}-complete`)
+      await page.context().close()
     }
     const retryPage = await makePage('retry-fixture', { width: 390, height: 844 }, true, false, true)
     const postsBeforeRetryFixture = evidence.livePostCount
@@ -305,6 +357,7 @@ try {
     assert.equal(fixtureTools.filter(item => item.path === toolPaths[0]).length, 2, 'Missing tool should be retried once')
     for (const path of toolPaths.slice(1)) assert.equal(fixtureTools.filter(item => item.path === path).length, 1, 'Successful tools must not be retried')
     record('Retry missing evidence control', 'isolated mobile Playwright; one injected tool failure followed by captured successful production response', { livePaidRequests: 0, retriedTool: toolPaths[0], successfulToolsNotRepeated: 9, screenshot: await screenshot(retryPage, 'retry-recovered') })
+    await retryPage.context().close()
   } else record('Paid investigation workflows', 'execution guard', 'Skipped until explicit --live authorization', 'NOT RUN')
   const audit = spawnSync('npm', ['audit', '--omit=dev', '--json'], { encoding: 'utf8', cwd: new URL('..', import.meta.url), timeout: 60_000 })
   await writeFile(join(output, `${prefix}-npm-audit.json`), audit.stdout || '{}')

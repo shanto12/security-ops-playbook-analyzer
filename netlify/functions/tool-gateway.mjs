@@ -183,13 +183,13 @@ async function callModel(spec, payload) {
     model,
     thinking: { type: "disabled" },
     temperature: 0.88,
-    max_tokens: 600,
+    max_tokens: 1400,
     stream: false,
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: `You are ${spec.name}, an enterprise security/corporate tool API. Return compact valid JSON. Do not use markdown. Do not wrap the answer in an "answer" field. Use concrete top-level keys from the requested schema hint. Produce a realistic but synthetic response. Vary every response using the incident ID, timestamp, and provided indicators. These are simulated tool records for a public demo, never real vendor results.`
+        content: `You are ${spec.name}, an enterprise security/corporate tool API. Return compact valid JSON. Do not use markdown. Do not wrap the answer in an "answer" field. Use 6 compact top-level keys from the schema hint. Arrays must contain at most 2 short items. Complete the JSON object within 450 tokens. Produce a realistic but synthetic response. Vary every response using the incident ID, timestamp, and provided indicators. These are simulated tool records for a public demo, never real vendor results.`
       },
       {
         role: "user",
@@ -199,7 +199,7 @@ async function callModel(spec, payload) {
             endpoint: spec.path,
             purpose: spec.purpose,
             schemaHint: spec.schemaHint,
-            size: "Return 6-10 compact but realistic fields. Avoid long arrays.",
+            size: "Return 6 compact fields. At most 2 items in any array; no verbose nested evidence.",
             incidentId,
             request: payload,
             diversitySeed: `${incidentId}-${Date.now()}-${Math.random().toString(36).slice(2)}`

@@ -486,11 +486,14 @@ function normalizeRunPlan(raw) {
   const severityOptions = ["Critical", "High", "Medium", "Low"];
   const severity = severityOptions.includes(compactIncident.severity) ? compactIncident.severity : "High";
   const iocs = compactIncident.iocs ?? {};
+  const rawPriority = Number(compactIncident.priorityScore ?? 8);
+  const priorityScore = Number.isFinite(rawPriority) ? Math.max(1, Math.min(10, rawPriority > 10 ? rawPriority / 10 : rawPriority)) : 8;
+  const alertSource = ["SIEM", "EDR", "NDR", "UEBA"].find((source) => String(compactIncident.initialAlertSource ?? "").toUpperCase().includes(source)) ?? "EDR";
   const incident = {
     incidentId: compactIncident.incidentId ?? `SOC-${(/* @__PURE__ */ new Date()).toISOString().slice(0, 10).replaceAll("-", "")}-${crypto.randomUUID().slice(0, 6)}`,
     timestamp: compactIncident.timestamp ?? (/* @__PURE__ */ new Date()).toISOString(),
     severity,
-    priorityScore: Number(compactIncident.priorityScore ?? 8),
+    priorityScore,
     incidentType: compactIncident.incidentType ?? "lateral movement",
     affectedUser: compactIncident.affectedUser ?? "jsmith@corp.example",
     affectedHost: compactIncident.affectedHost ?? "WS-FIN-042",
@@ -498,7 +501,7 @@ function normalizeRunPlan(raw) {
     affectedDepartment: compactIncident.affectedDepartment ?? "Finance",
     mitreTactic: compactIncident.mitreTactic ?? "Credential Access",
     mitreTechnique: compactIncident.mitreTechnique ?? "T1003 OS Credential Dumping",
-    initialAlertSource: compactIncident.initialAlertSource ?? "EDR",
+    initialAlertSource: alertSource,
     iocs: {
       ip: iocs.ip ?? compactIncident.affectedIp ?? "10.42.18.77",
       hash: iocs.hash ?? "b8a9f4f9d3a7d827b7110edc9d0f42d9b30d0db1f7c4e75db3ef1be9013c8a33",
@@ -684,6 +687,7 @@ async function runCyclicInvestigationGraph({
     send("node_start", { node: "incident_generator", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     const orchestrationPrompt = `JSON only. Seed ${Date.now()}-${crypto.randomUUID()}. Shape {"i":incident,"a":approval}.
 Create a complex multi-stage enterprise SOC incident with identity+endpoint+cloud+email+SIEM evidence, conflicting signals, two departments, MITRE mapping, IOCs, and one-line raw log. Keep strings compact.
+Use priorityScore 1-10 and initialAlertSource exactly SIEM, EDR, NDR, or UEBA.
 i fields: incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet.
 a={actionName,target,toolArguments,riskJustification}.`;
     const orchestratedRun = await callModelJson({

@@ -249,10 +249,6 @@ function numberValue(value: unknown) {
     : undefined;
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function toolPayload(tool: EnterpriseTool, incident: Incident) {
   return {
     incident,
@@ -396,11 +392,15 @@ async function runEnterpriseToolFanout(
   appendLogs: (logs: ApiLogEntry[]) => void,
   selectedTools: EnterpriseTool[] = toolEndpoints,
 ) {
-  for (const tool of selectedTools) {
-    const log = await callEnterpriseTool(tool, incident);
-    appendLogs([log]);
-    await wait(650);
-  }
+  let nextTool = 0;
+  const worker = async () => {
+    while (nextTool < selectedTools.length) {
+      const tool = selectedTools[nextTool++];
+      const log = await callEnterpriseTool(tool, incident);
+      appendLogs([log]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, selectedTools.length) }, worker));
 }
 
 function applyRunEvent(current: RunState, item: SseEvent): RunState {
@@ -1121,7 +1121,7 @@ function ApprovalCard({
       <div className="kv compact">
         <span>Target</span>
         <strong>{request.target}</strong>
-        <span>Expires</span>
+        <span>Review suggested by</span>
         <strong>{shortTime(request.expiresAt)}</strong>
       </div>
       {editing ? (

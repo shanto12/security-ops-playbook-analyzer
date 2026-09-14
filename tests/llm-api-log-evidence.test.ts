@@ -42,7 +42,7 @@ const runPlan = {
     incidentId: 'SOC-TEST-001',
     timestamp: '2026-05-03T12:00:00.000Z',
     severity: 'High',
-    priorityScore: 8,
+    priorityScore: 94,
     incidentType: 'credential access',
     affectedUser: 'analyst@example.com',
     affectedHost: 'WS-TEST-001',
@@ -50,7 +50,7 @@ const runPlan = {
     affectedDepartment: 'Finance',
     mitreTactic: 'Credential Access',
     mitreTechnique: 'T1003 OS Credential Dumping',
-    initialAlertSource: 'EDR',
+    initialAlertSource: 'SIEM correlation rule',
     iocs: {
       ip: '10.10.10.10',
       hash: 'a'.repeat(64),
@@ -260,6 +260,7 @@ describe('LLM API log evidence', () => {
       .map((event) => event.data as { state?: Record<string, unknown> })
       .filter((checkpoint) => checkpoint.state?.route)
 
+    expect.soft(events.find(event => event.event === 'incident')?.data).toMatchObject({ priorityScore: 9.4, initialAlertSource: 'SIEM' })
     expect.soft(llmLogs).toHaveLength(1)
     expect.soft(toolLogs).toHaveLength(0)
     expect.soft((fanout?.data as { tools?: unknown[] } | undefined)?.tools).toHaveLength(10)
