@@ -29,17 +29,13 @@ Both screenshots are actual September 2026 production captures using synthetic s
 
 ## Architecture and state
 
-```mermaid
-flowchart LR
-  UI[React analyst workspace] --> RUN[Netlify initial-run function]
-  RUN --> GRAPH[LangGraph StateGraph]
-  GRAPH --> MODEL[DeepSeek model calls]
-  GRAPH --> SSE[Streamed events and snapshots]
-  SSE --> UI
-  UI --> DECISION[Analyst decision and submitted context]
-  DECISION --> RESUME[Stateless continuation function]
-  RESUME --> REPORT[Deterministic action record and model narrative]
-  REPORT --> UI
+```text
+React analyst workspace
+  -> Netlify initial-run function
+  -> LangGraph StateGraph + DeepSeek calls
+  -> streamed events and browser-held snapshots
+  -> analyst decision + submitted context
+  -> stateless continuation + final report
 ```
 
 | Layer | Implementation |
