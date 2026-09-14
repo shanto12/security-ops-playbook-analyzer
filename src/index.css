@@ -1143,9 +1143,12 @@ summary:hover {
   gap: 8px;
 }
 .reportBody {
+  min-width: 0;
   max-width: 920px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+  overflow-wrap: anywhere;
 }
 .report h3 {
   font-size: 12px;
