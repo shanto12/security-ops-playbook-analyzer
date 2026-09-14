@@ -324,11 +324,8 @@ try {
         await page.getByText(/Invalid JSON/i).waitFor()
         assert.equal(evidence.livePostCount, beforeInvalid, 'Invalid JSON must not reach backend')
         record('Malformed containment edit blocked', 'isolated mobile Playwright', 'Validation error visible; no live request sent')
-        args.durationMinutes = 15
-        args.host = editedHost
-        if ('target' in args) args.target = editedHost
-        if ('hostname' in args) args.hostname = editedHost
-        await page.locator('.approval textarea').fill(JSON.stringify(args, null, 2))
+        const submittedArguments = { host_id: editedHost, duration_minutes: 15, disable_user: false }
+        await page.locator('.approval textarea').fill(JSON.stringify(submittedArguments, null, 2))
         await page.getByRole('button', { name: /^Review$/ }).click()
         await page.getByRole('button', { name: /^Edit$/ }).click()
         await page.getByRole('button', { name: /Edit & Approve/ }).click()
@@ -337,8 +334,9 @@ try {
       const human = exported.apiLogs.filter(log => log.type === 'human').at(-1)
       assert.equal(human.requestPayload.decision, decision)
       if (decision === 'edit') {
-        assert.equal(human.requestPayload.editedArguments.durationMinutes, 15)
-        assert.equal(human.requestPayload.editedArguments.host, editedHost)
+        assert.equal(human.requestPayload.editedArguments.duration_minutes, 15)
+        assert.equal(human.requestPayload.editedArguments.host_id, editedHost)
+        assert.equal(human.requestPayload.editedArguments.disable_user, false)
       }
       const response = evidence.requests.filter(item => item.label === label && item.path === '/api/resume-run').at(-1)
       const resumedCheckpoint = sse(response.body).find(item => item.event === 'checkpoint' && item.data.node === 'containment_resume')?.data
@@ -355,6 +353,25 @@ try {
         assert.equal(edr?.durationMinutes, 15, 'Edited duration not used by simulated EDR action')
       }
       record(`${decision} decision reaches backend`, 'isolated Playwright + live production resume; captured original investigation reused', { decision, approvalSnapshotReused: true, serverCheckpoint: resumedCheckpoint })
+      const actionFacts = exported.report.containmentActions.join('\n')
+      const decisionFacts = exported.report.analystDecisions.join('\n')
+      if (decision === 'edit') {
+        assert(actionFacts.includes(editedHost), 'Delivered containment actions omit the edited host')
+        assert(/15\s+minutes/i.test(actionFacts), 'Delivered containment actions omit the edited duration')
+        assert(/No account disabled/i.test(actionFacts), 'Delivered containment actions falsely imply account disablement')
+        assert(/Decision:\s*edit\b/i.test(decisionFacts), 'Delivered analyst decisions do not state the actual edit decision')
+        assert(decisionFacts.includes(editedHost), 'Delivered analyst decisions omit the edited target')
+        assert(/"durationMinutes"\s*:\s*15/.test(decisionFacts), 'Delivered effective arguments omit normalized duration')
+        assert(/"disable_user"\s*:\s*false/.test(decisionFacts), 'Delivered effective arguments changed disable_user:false')
+        for (const text of [actionFacts, decisionFacts]) {
+          assert(!text.includes(exported.incident.affectedHost), 'Authoritative report arrays incorrectly retain original host')
+          assert(!/Decision:\s*approve\b/i.test(text), 'Authoritative report arrays incorrectly say approve instead of edit')
+        }
+      } else {
+        assert(/No containment.*executed/i.test(actionFacts), 'Rejected report falsely claims a containment action')
+        assert(/Decision:\s*reject\b/i.test(decisionFacts), 'Rejected report does not state actual reject decision')
+      }
+      record(`${decision} final report matches authoritative execution facts`, 'current production report SSE and downloaded JSON export; exact action and decision facts checked', { containmentActions: exported.report.containmentActions, analystDecisions: exported.report.analystDecisions })
       await tabs(page, label)
       const reportShortcut = page.getByRole('button', { name: /Read the report/i })
       if (await reportShortcut.count()) await reportShortcut.click()

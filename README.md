@@ -7,7 +7,7 @@ A public portfolio lab that turns a synthetic security alert into a transparent 
 
 ## What actually runs
 
-The initial investigation executes a real `@langchain/langgraph` StateGraph with cyclic edges. DeepSeek Flash generates the incident, ten synthetic tool responses, the final report, and alternate checkpoint analysis. Model requests and responses are recorded with actual provider, model, latency, usage, and status. Z.ai remains an optional configured provider.
+The initial investigation executes a real `@langchain/langgraph` StateGraph with cyclic edges. DeepSeek Flash generates the incident, ten synthetic tool responses, report narrative, and alternate checkpoint analysis. The report's containment actions and analyst decisions are rendered deterministically from recorded synthetic execution, so model prose cannot replace the edited target, duration, or decision. Model requests and responses are recorded with actual provider, model, latency, usage, and status. Z.ai remains an optional configured provider.
 
 The enterprise system names are **simulated interfaces**. There are no connections to a real SIEM, EDR, directory, ticketing system, firewall, or Slack account. Approval records a demo decision; containment, ticketing, and notifications are synthesized locally. Specialist routes use a predefined cyclic plan unless the model supplies a routing plan.
 

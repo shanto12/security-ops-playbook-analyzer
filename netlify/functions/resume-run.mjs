@@ -186,9 +186,10 @@ function normalizeReport(report, incident, decision, fallback = {}) {
     mitreMapping: list(report?.mitreMapping, fallback?.mitreMapping, 2),
     timeline: list(report?.timeline, fallback?.timeline, 4),
     agentRouting: list(report?.agentRouting ?? report?.cycleSummary ?? report?.routingTrace, fallback?.agentRouting),
-    containmentActions: list(report?.containmentActions, fallback?.containmentActions, 2),
+    // Execution facts are server-authored, never overwritten by model narrative.
+    containmentActions: list(fallback?.containmentActions),
     recommendations: list(report?.recommendations, fallback?.recommendations, 4),
-    analystDecisions: list(report?.analystDecisions, fallback?.analystDecisions),
+    analystDecisions: list(fallback?.analystDecisions),
     toolResultSummary: list(report?.toolResultSummary, fallback?.toolResultSummary, 2)
   };
 }
@@ -263,7 +264,7 @@ async function modelReport(prompt, send) {
     messages: [
       {
         role: "system",
-        content: "Return compact valid JSON only for a synthetic SOC exercise report. No markdown. All containment, tickets, and notifications are simulated; never claim real system changes or message delivery. Keep each array entry to one short sentence, at most 18 words; finish every JSON array and object."
+        content: "Return compact valid JSON only for a synthetic SOC exercise report. No markdown. All containment, tickets, and notifications are simulated; never claim real system changes or message delivery. The server authors containmentActions and analystDecisions from execution records: omit these fields and do not restate executed actions or analyst decisions in narrative fields. Keep each array entry to one short sentence, at most 18 words; finish every JSON array and object."
       },
       { role: "user", content: JSON.stringify(prompt) }
     ]
@@ -396,8 +397,14 @@ var resume_run_default = async (req) => {
   if (payload.decision === "edit" && (!payload.editedArguments || typeof payload.editedArguments !== "object" || Array.isArray(payload.editedArguments))) {
     return Response.json({ error: "Edited arguments must be a JSON object." }, { status: 400 });
   }
-  const effectiveArguments = payload.decision === "edit" ? payload.editedArguments : asArgumentsObject(payload.approval.toolArguments);
-  const effectiveTarget = payload.decision === "edit" ? effectiveArguments.target ?? effectiveArguments.host ?? effectiveArguments.hostname ?? payload.approval.target : payload.approval.target;
+  const submittedArguments = payload.decision === "edit" ? payload.editedArguments : asArgumentsObject(payload.approval.toolArguments);
+  const effectiveTarget = submittedArguments.target ?? submittedArguments.host ?? submittedArguments.hostname ?? submittedArguments.host_id ?? payload.approval.target;
+  const durationMinutes = submittedArguments.durationMinutes ?? submittedArguments.duration_minutes;
+  const effectiveArguments = {
+    ...submittedArguments,
+    ...effectiveTarget !== void 0 ? { host: effectiveTarget } : {},
+    ...durationMinutes !== void 0 ? { durationMinutes } : {}
+  };
   payload.approval = { ...payload.approval, target: effectiveTarget, toolArguments: effectiveArguments };
   const stream = new ReadableStream({
     async start(controller) {
@@ -487,7 +494,12 @@ data: ${JSON.stringify(data)}
             "Ticketing and notifications completed"
           ],
           agentRouting: formattedRoutes.length ? formattedRoutes : ["Supervisor -> Triage -> Enrichment -> Log Analysis -> Enrichment -> Threat Intel -> Supervisor -> Containment"],
-          containmentActions: logs.length ? logs.map((log) => `${log.toolName}: ${JSON.stringify(log.responsePayload)}`) : [`No containment tool was executed because analyst decision was ${decision}.`],
+          containmentActions: logs.length ? logs.map((log) => {
+            const result = log.responsePayload;
+            if (log.toolName === "Firewall") return `Simulated Firewall preview: target ${result.target}. No real firewall change.`;
+            if (log.toolName === "EDR") return `Simulated EDR containment: host ${result.hostname}; duration ${result.durationMinutes ?? "unspecified"}${result.durationMinutes !== void 0 ? " minutes" : ""}. No real host change.`;
+            return `Identity review only: ${result.userPrincipalName}; ${result.accountAction}. No account disabled.`;
+          }) : ["No containment actions were simulated or executed because the analyst rejected the request."],
           recommendations: [
             `Terminate active sessions and rotate credentials for ${incident?.affectedUser ?? "the affected user"}.`,
             `Review process ancestry and network connections on ${incident?.affectedHost ?? "the affected host"}.`,
@@ -495,7 +507,8 @@ data: ${JSON.stringify(data)}
             "Validate containment expiry, ticket ownership, and post-incident control improvements before closure."
           ],
           analystDecisions: [
-            `${decision} ${payload?.approval?.actionName ?? "containment"} for ${payload?.approval?.target ?? incident?.affectedHost ?? "the target"} with arguments ${JSON.stringify(payload?.editedArguments ?? payload?.approval?.toolArguments ?? {})}`
+            `Decision: ${decision}${decision === "edit" ? " (edited and approved)" : ""} for ${payload?.approval?.actionName ?? "containment"} on ${effectiveTarget ?? "the target"}.`,
+            `Effective arguments: ${JSON.stringify(effectiveArguments)}.`
           ],
           toolResultSummary: [
             ...enterpriseToolEvidence.map(formatToolEvidence),
@@ -521,9 +534,7 @@ data: ${JSON.stringify(data)}
                 mitreMapping: ["strings"],
                 timeline: ["at least five non-empty strings"],
                 agentRouting: ["summarize each cyclic agent handoff, including backtrack edges"],
-                containmentActions: ["at least two non-empty strings"],
                 recommendations: ["at least four non-empty strings"],
-                analystDecisions: ["at least one non-empty string"],
                 toolResultSummary: ["summarize each prior enterprise tool plus ticketing/notification result as non-empty strings"]
               }
             },
