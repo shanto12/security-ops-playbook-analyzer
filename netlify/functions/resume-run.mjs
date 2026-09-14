@@ -1,3 +1,16 @@
+// src/lib/arguments.ts
+function asArgumentsObject(value, fallback = {}) {
+  let parsed = value;
+  for (let depth = 0; depth < 2 && typeof parsed === "string"; depth += 1) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return fallback;
+    }
+  }
+  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+}
+
 // netlify/lib/provider.ts
 function envValue(name) {
   return globalThis.Netlify?.env.get(name);
@@ -383,7 +396,7 @@ var resume_run_default = async (req) => {
   if (payload.decision === "edit" && (!payload.editedArguments || typeof payload.editedArguments !== "object" || Array.isArray(payload.editedArguments))) {
     return Response.json({ error: "Edited arguments must be a JSON object." }, { status: 400 });
   }
-  const effectiveArguments = payload.decision === "edit" ? payload.editedArguments : payload.approval.toolArguments ?? {};
+  const effectiveArguments = payload.decision === "edit" ? payload.editedArguments : asArgumentsObject(payload.approval.toolArguments);
   const effectiveTarget = payload.decision === "edit" ? effectiveArguments.target ?? effectiveArguments.host ?? effectiveArguments.hostname ?? payload.approval.target : payload.approval.target;
   payload.approval = { ...payload.approval, target: effectiveTarget, toolArguments: effectiveArguments };
   const stream = new ReadableStream({

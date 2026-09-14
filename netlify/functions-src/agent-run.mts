@@ -1,3 +1,4 @@
+import { asArgumentsObject } from '../../src/lib/arguments'
 import { getProvider, envValue } from '../lib/provider'
 import type { Config } from '@netlify/functions'
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph'
@@ -631,11 +632,11 @@ function normalizeRunPlan(raw: any) {
   const containment = {
     actionName: compactContainment.actionName ?? compactContainment.action ?? 'isolate_host',
     target: compactContainment.target ?? incident.affectedHost,
-    toolArguments: compactContainment.toolArguments ?? compactContainment.args ?? {
+    toolArguments: asArgumentsObject(compactContainment.toolArguments ?? compactContainment.args, {
       host: incident.affectedHost,
       durationMinutes: 45,
       ticket: incident.incidentId,
-    },
+    }),
     riskJustification:
       compactContainment.riskJustification ??
       compactContainment.risk ??

@@ -82,7 +82,7 @@ const runPlan = {
   a: {
     actionName: 'isolate_host',
     target: 'WS-TEST-001',
-    toolArguments: { host: 'WS-TEST-001', durationMinutes: 45 },
+    toolArguments: JSON.stringify({ host: 'WS-TEST-001', durationMinutes: 45 }),
     riskJustification: 'Containment prevents lateral movement.',
   },
   routingPlan: [
@@ -260,6 +260,7 @@ describe('LLM API log evidence', () => {
       .map((event) => event.data as { state?: Record<string, unknown> })
       .filter((checkpoint) => checkpoint.state?.route)
 
+    expect.soft(events.find(event => event.event === 'approval_required')?.data).toMatchObject({ toolArguments: { host: 'WS-TEST-001', durationMinutes: 45 } })
     expect.soft(events.find(event => event.event === 'incident')?.data).toMatchObject({ priorityScore: 9.4, initialAlertSource: 'SIEM' })
     expect.soft(llmLogs).toHaveLength(1)
     expect.soft(toolLogs).toHaveLength(0)

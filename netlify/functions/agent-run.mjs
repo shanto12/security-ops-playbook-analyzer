@@ -1,3 +1,16 @@
+// src/lib/arguments.ts
+function asArgumentsObject(value, fallback = {}) {
+  let parsed = value;
+  for (let depth = 0; depth < 2 && typeof parsed === "string"; depth += 1) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return fallback;
+    }
+  }
+  return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : fallback;
+}
+
 // netlify/lib/provider.ts
 function envValue(name) {
   return globalThis.Netlify?.env.get(name);
@@ -543,11 +556,11 @@ function normalizeRunPlan(raw) {
   const containment = {
     actionName: compactContainment.actionName ?? compactContainment.action ?? "isolate_host",
     target: compactContainment.target ?? incident.affectedHost,
-    toolArguments: compactContainment.toolArguments ?? compactContainment.args ?? {
+    toolArguments: asArgumentsObject(compactContainment.toolArguments ?? compactContainment.args, {
       host: incident.affectedHost,
       durationMinutes: 45,
       ticket: incident.incidentId
-    },
+    }),
     riskJustification: compactContainment.riskJustification ?? compactContainment.risk ?? "Temporary isolation may interrupt user work but reduces lateral movement risk."
   };
   const rawRoutes = Array.isArray(raw?.routingPlan) ? raw.routingPlan : Array.isArray(raw?.cycle) ? raw.cycle : Array.isArray(raw?.r) ? raw.r : [];

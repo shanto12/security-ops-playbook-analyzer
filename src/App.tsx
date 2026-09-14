@@ -1,3 +1,4 @@
+import { asArgumentsObject } from './lib/arguments';
 import {
   AlertTriangle,
   ArrowRight,
@@ -1089,7 +1090,7 @@ function ApprovalCard({
 }) {
   const [editing, setEditing] = useState(false);
   const [args, setArgs] = useState(
-    JSON.stringify(request.toolArguments, null, 2),
+    JSON.stringify(asArgumentsObject(request.toolArguments), null, 2),
   );
   const [argumentError, setArgumentError] = useState<string>();
 
@@ -1134,7 +1135,7 @@ function ApprovalCard({
           }}
         />
       ) : (
-        <pre>{JSON.stringify(request.toolArguments, null, 2)}</pre>
+        <pre>{JSON.stringify(asArgumentsObject(request.toolArguments), null, 2)}</pre>
       )}
       {argumentError ? (
         <p className="argumentError" role="alert">

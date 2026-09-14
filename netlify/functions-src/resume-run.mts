@@ -1,3 +1,4 @@
+import { asArgumentsObject } from '../../src/lib/arguments'
 import { getProvider } from '../lib/provider'
 import type { Config } from '@netlify/functions'
 
@@ -415,7 +416,7 @@ export default async (req: Request) => {
   if (payload.decision === 'edit' && (!payload.editedArguments || typeof payload.editedArguments !== 'object' || Array.isArray(payload.editedArguments))) {
     return Response.json({ error: 'Edited arguments must be a JSON object.' }, { status: 400 })
   }
-  const effectiveArguments = payload.decision === 'edit' ? payload.editedArguments : payload.approval.toolArguments ?? {}
+  const effectiveArguments = payload.decision === 'edit' ? payload.editedArguments : asArgumentsObject(payload.approval.toolArguments)
   const effectiveTarget = payload.decision === 'edit'
     ? effectiveArguments.target ?? effectiveArguments.host ?? effectiveArguments.hostname ?? payload.approval.target
     : payload.approval.target

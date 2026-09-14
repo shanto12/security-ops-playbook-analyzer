@@ -9,11 +9,12 @@ import { chromium } from 'playwright'
 // initial responses, but their resume calls and reports are real production calls.
 const live = process.argv.includes('--live')
 const capturedInputFile = process.env.VERIFY_INPUT_EVIDENCE
+const editOnly = process.env.VERIFY_EDIT_ONLY === '1'
 const baseUrl = process.env.VERIFY_URL || 'https://security-ops-playbook-analyzer.netlify.app'
 const output = process.env.VERIFY_OUTPUT || '/Users/shanto/Documents/Playground/portfolio-curation-2026-09-14/soc'
 const prefix = live ? 'production' : 'read-only'
 const localTime = () => new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'long' }).format(new Date())
-const evidence = { deploymentId: process.env.VERIFY_DEPLOY_ID, sourceCommit: process.env.VERIFY_COMMIT, baseUrl, mode: live ? capturedInputFile ? 'current production decisions with explicitly captured prior production scenario/tool inputs' : 'bounded live production' : 'read-only production', started: localTime(), manualChrome: 'NOT TESTED: parent coordinator owns real Chrome', checks: [], requests: [], errors: [], controls: [], paidRequestCap: capturedInputFile ? 4 : 15, livePostCount: 0 }
+const evidence = { deploymentId: process.env.VERIFY_DEPLOY_ID, sourceCommit: process.env.VERIFY_COMMIT, baseUrl, mode: live ? editOnly ? 'outstanding live edit decision plus fixture recovery; earlier deployment approve/reject/replay evidence retained separately with explicit provenance' : capturedInputFile ? 'current production decisions with explicitly captured prior production scenario/tool inputs' : 'bounded live production' : 'read-only production', started: localTime(), manualChrome: 'NOT TESTED: parent coordinator owns real Chrome', checks: [], requests: [], errors: [], controls: [], paidRequestCap: editOnly ? 1 : capturedInputFile ? 4 : 15, livePostCount: 0 }
 const fixtures = new Map()
 const captureTasks = []
 let partialWrite = Promise.resolve()
@@ -250,6 +251,7 @@ try {
   record('Provider error is visible', 'isolated Playwright with explicitly injected failure', { screenshot: await screenshot(errorPage, 'injected-error') })
   await errorPage.context().close()
   if (live) {
+    if (!editOnly) {
     await start(desktop)
     await readyApproval(desktop, 'desktop-live')
     const initial = sse(fixtures.get('/api/agent-run').body)
@@ -305,7 +307,8 @@ try {
     assert(!replayEvents.some(item => item.event === 'error'))
     record('Snapshot alternate analysis', 'isolated Playwright + live production SSE; browser snapshot supplied to model, not native checkpoint resume', { audit: validateModel(replayEvents.find(item => item.event === 'api_call' && item.data.type === 'llm')?.data, 'replay'), screenshot: await screenshot(desktop, 'replay') })
     await desktop.context().close()
-    for (const decision of ['reject', 'edit']) {
+    } else await desktop.context().close()
+    for (const decision of editOnly ? ['edit'] : ['reject', 'edit']) {
       const label = `${decision}-live-resume`
       const page = await makePage(label, decision === 'edit' ? { width: 390, height: 844 } : { width: 1440, height: 900 }, true)
       await start(page)
@@ -313,6 +316,8 @@ try {
       if (decision === 'edit') {
         await page.getByRole('button', { name: /^Edit$/ }).click()
         const args = JSON.parse(await page.locator('.approval textarea').inputValue())
+        assert(args && typeof args === 'object' && !Array.isArray(args), 'Edit textarea must initially contain a JSON object, including when historical inputs encoded arguments as a JSON string')
+        record('Historical string arguments normalized in Edit UI', 'isolated mobile Playwright against current frontend with historical production input', 'Textarea parses directly to a JSON object; verifier does not repair application input')
         const beforeInvalid = evidence.livePostCount
         await page.locator('.approval textarea').fill('{ invalid')
         await page.getByRole('button', { name: /Edit & Approve/ }).click()
