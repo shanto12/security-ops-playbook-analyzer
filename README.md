@@ -1,51 +1,87 @@
-# Sentinel — SOC investigation workspace
+# Sentinel: SOC Investigation Workspace
 
-A public portfolio lab that turns a synthetic security alert into a transparent investigation, an analyst decision, and a downloadable report. The UI separates the case overview, execution graph, evidence/replay, and report so the analyst can follow one stage at a time.
+**A transparent AI investigation workflow, from a security alert to an analyst decision and an evidence-backed report.** Built by [Shanto Mathew](https://github.com/shanto12) as a personal engineering project.
 
-- [Live application](https://security-ops-playbook-analyzer.netlify.app)
-- [Source](https://github.com/shanto12/security-ops-playbook-analyzer)
+[Open live application](https://security-ops-playbook-analyzer.netlify.app) · [Explore the orchestration code](netlify/functions-src/agent-run.mts) · [Review the tests](tests)
 
-## What actually runs
+![Completed investigation report with analyst decision and evidence](docs/screenshots/investigation-report.png)
 
-The initial investigation executes a real `@langchain/langgraph` StateGraph with cyclic edges. DeepSeek Flash generates the incident, ten synthetic tool responses, report narrative, and alternate checkpoint analysis. The report's containment actions and analyst decisions are rendered deterministically from recorded synthetic execution, so model prose cannot replace the edited target, duration, or decision. Model requests and responses are recorded with actual provider, model, latency, usage, and status. Z.ai remains an optional configured provider.
+## Review it in three minutes
 
-The enterprise system names are **simulated interfaces**. There are no connections to a real SIEM, EDR, directory, ticketing system, firewall, or Slack account. Approval records a demo decision; containment, ticketing, and notifications are synthesized locally. Specialist routes use a predefined cyclic plan unless the model supplies a routing plan.
+1. Open the live application and choose **Generate Incident** or **Start first investigation**.
+2. Follow the execution graph and inspect the ten synthetic evidence requests, handoffs and model audit details.
+3. Approve, reject or edit the simulated containment request; inspect the final report and export JSON or print/save PDF.
+4. Select a checkpoint to request an alternate branch analysis.
 
-Checkpoints live in the browser session, not a durable shared database. Resume is a separate stateless function using the submitted checkpoint context; replay asks the model for an alternate branch analysis. They are not a persistent LangGraph checkpointer/Command replay service. Reloading clears the current investigation.
+The hosted investigation makes real model requests. Security alerts, enterprise tool responses and containment actions are synthetic; no real security system is modified.
 
-## Try the workflow
+## Engineering worth inspecting
 
-1. Choose **Generate Incident** or **Start first investigation**.
-2. Follow the execution stages and ten synthetic evidence requests.
-3. Inspect graph nodes, handoffs, checkpoint state, and API audit details.
-4. Approve, reject, or edit the simulated containment request.
-5. Read the final report, export the evidence as JSON, or open the print/save-PDF view.
-6. Select a checkpoint and fork an alternate branch analysis.
+- **Cyclic orchestration:** the initial investigation executes a real LangGraph `StateGraph`, with observable node transitions and specialist handoffs.
+- **Human decision authority:** edited targets, durations and approve/reject decisions determine the simulated execution record. The report cannot silently replace those facts with model prose.
+- **Observable model calls:** provider/model identity, latency, token usage, request/response data and status appear in the investigation audit.
+- **Explicit failure handling:** unavailable providers and failed report generation are surfaced instead of being shown as successful investigations.
+- **Reviewable outputs:** graph, evidence, report, export and alternate analysis share one investigation context.
 
-## Configuration
+![Execution graph and investigation state](docs/screenshots/execution-graph.png)
 
-See `.env.example`. Production credentials belong in Netlify environment variables. The browser never receives them. `AI_PROVIDER=deepseek` selects `deepseek-flash`; `AI_PROVIDER=glm` preserves the optional GLM configuration. Thinking is disabled and completion output is bounded. Failed tool requests are not automatically retried.
+Both screenshots are actual September 2026 production captures using synthetic security evidence.
 
-`GET /api/health` makes an authenticated model-catalog probe. It reports model reachability, explicitly **not** generation quota or an end-to-end successful run. Provider failures are surfaced in the workflow. Report-model failure does not emit a successful completion.
+## Architecture and state
 
-## Development and verification
+```mermaid
+flowchart LR
+  UI[React analyst workspace] --> RUN[Netlify initial-run function]
+  RUN --> GRAPH[LangGraph StateGraph]
+  GRAPH --> MODEL[DeepSeek model calls]
+  GRAPH --> SSE[Streamed events and snapshots]
+  SSE --> UI
+  UI --> DECISION[Analyst decision and submitted context]
+  DECISION --> RESUME[Stateless continuation function]
+  RESUME --> REPORT[Deterministic action record and model narrative]
+  REPORT --> UI
+```
+
+| Layer | Implementation |
+|---|---|
+| Interface | React, TypeScript and Vite |
+| Initial orchestration | `@langchain/langgraph` with cyclic edges |
+| Hosted backend | Netlify Functions; source in [functions-src](netlify/functions-src), shared [provider configuration](netlify/lib/provider.ts) |
+| Model provider | DeepSeek Flash by default; optional configured Z.ai route |
+| State | Browser-held investigation snapshots and submitted continuation context |
+| Persistence | No shared database or durable LangGraph checkpointer |
+
+Resume is a separate stateless function using submitted checkpoint context. Replay asks the model for alternate branch analysis. Neither is a persistent LangGraph checkpoint/Command replay service; reloading clears the active investigation. Specialist routing has a predefined cyclic plan unless the model supplies a routing plan.
+
+## Run locally
+
+Use a current Node.js LTS release and npm.
 
 ```sh
+git clone https://github.com/shanto12/security-ops-playbook-analyzer.git
+cd security-ops-playbook-analyzer
 npm ci
+npm run dev
+```
+
+The Vite command serves the interface. For the complete local workflow, configure server-side variables from [.env.example](.env.example), build the function bundles, and use Netlify Dev:
+
+```sh
+npm run build
+npx netlify-cli dev
+```
+
+Set `AI_PROVIDER=deepseek` and a valid `DEEPSEEK_API_KEY` in the local server environment or Netlify environment settings. Credentials must never use a `VITE_` prefix. The browser does not receive provider keys. Model execution uses the configured provider account.
+
+## Verify the code
+
+```sh
 npm run verify
 npm audit --omit=dev
-npm run build
 ```
 
-Use `netlify dev` with credentials supplied securely to the local runtime to exercise Functions. For deployment, use the Netlify connector first. Generated `netlify/functions/*.mjs` bundles include the shared provider configuration; source lives in `netlify/functions-src/` and `netlify/lib/`.
+`verify` runs lint, unit tests and the production build. [Provider tests](tests/provider.test.ts), [report-authority tests](tests/report-authority.test.ts) and [audit-evidence tests](tests/llm-api-log-evidence.test.ts) cover consequential failure and consistency paths. The [production verification script](scripts/verify-refresh.mjs) keeps paid generation behind an explicit `--live` flag; its default mode does not run paid model workflows. Earlier May 2026 files in `docs/` are historical evidence, not current release proof.
 
-```sh
-node scripts/verify-refresh.mjs        # Read-only production UI/header checks
-node scripts/verify-refresh.mjs --live # Bounded paid production verification
-```
+## Scope
 
-The live suite caps generation POSTs, records real provider evidence, and reuses the first run's captured input for alternate decision paths. Historical May 2026 evidence in `docs/` describes the prior release and is not current proof.
-
-## Operational boundaries
-
-This is an unauthenticated public demonstration, not an enterprise security deployment. No login/password-manager workflow is applicable. Browser-session state is not durable or access controlled. The existing per-instance run limiter is best effort and is not a global spending cap. Set provider/account spending limits or add durable rate limiting before broader traffic. No top-ups are performed by the app.
+This is a public portfolio lab with no login or durable access-controlled case storage. SIEM, EDR, identity, ticketing, firewall and notification interfaces are simulated. No live containment, ticket creation or external notification occurs. The existing instance-local run limiter is best effort, not a global spending cap. `/api/health` verifies model-catalog reachability, not generation quota or completion of an investigation.
