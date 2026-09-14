@@ -1681,7 +1681,7 @@ function App() {
         />
         <Metric
           label="Investigation duration"
-          value={run.mttrMs ? duration(run.mttrMs) : "—"}
+          value={run.completedAt && run.startedAt ? duration(Math.max(0, Date.parse(run.completedAt) - Date.parse(run.startedAt))) : "—"}
         />
       </section>
       <nav

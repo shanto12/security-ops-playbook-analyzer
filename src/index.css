@@ -925,6 +925,10 @@ summary:hover {
   padding: 12px;
   font-size: 11px;
 }
+.routeStep > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .routeStep > span {
   color: var(--violet);
   font-family: monospace;

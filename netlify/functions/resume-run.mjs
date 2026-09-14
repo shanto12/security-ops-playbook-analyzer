@@ -244,13 +244,13 @@ async function modelReport(prompt, send) {
   const requestBody = {
     model,
     temperature: 0.72,
-    max_tokens: 1800,
+    max_tokens: 4096,
     thinking: { type: "disabled" },
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: "Return compact valid JSON only for a synthetic SOC exercise report. No markdown. All containment, tickets, and notifications are simulated; never claim real system changes or message delivery."
+        content: "Return compact valid JSON only for a synthetic SOC exercise report. No markdown. All containment, tickets, and notifications are simulated; never claim real system changes or message delivery. Keep each array entry to one short sentence, at most 18 words; finish every JSON array and object."
       },
       { role: "user", content: JSON.stringify(prompt) }
     ]
