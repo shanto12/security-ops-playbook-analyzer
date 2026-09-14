@@ -8,11 +8,12 @@ import { chromium } from 'playwright'
 // context, never the user's Chrome profile. Alternate decisions reuse captured
 // initial responses, but their resume calls and reports are real production calls.
 const live = process.argv.includes('--live')
+const capturedInputFile = process.env.VERIFY_INPUT_EVIDENCE
 const baseUrl = process.env.VERIFY_URL || 'https://security-ops-playbook-analyzer.netlify.app'
 const output = process.env.VERIFY_OUTPUT || '/Users/shanto/Documents/Playground/portfolio-curation-2026-09-14/soc'
 const prefix = live ? 'production' : 'read-only'
 const localTime = () => new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', dateStyle: 'full', timeStyle: 'long' }).format(new Date())
-const evidence = { deploymentId: process.env.VERIFY_DEPLOY_ID, sourceCommit: process.env.VERIFY_COMMIT, baseUrl, mode: live ? 'bounded live production' : 'read-only production', started: localTime(), manualChrome: 'NOT TESTED: parent coordinator owns real Chrome', checks: [], requests: [], errors: [], controls: [], paidRequestCap: 15, livePostCount: 0 }
+const evidence = { deploymentId: process.env.VERIFY_DEPLOY_ID, sourceCommit: process.env.VERIFY_COMMIT, baseUrl, mode: live ? capturedInputFile ? 'current production decisions with explicitly captured prior production scenario/tool inputs' : 'bounded live production' : 'read-only production', started: localTime(), manualChrome: 'NOT TESTED: parent coordinator owns real Chrome', checks: [], requests: [], errors: [], controls: [], paidRequestCap: capturedInputFile ? 4 : 15, livePostCount: 0 }
 const fixtures = new Map()
 const captureTasks = []
 let partialWrite = Promise.resolve()
@@ -20,6 +21,15 @@ const endpointCalls = new Map()
 const editedHost = 'SOC-VERIFY-EDITED-HOST'
 const toolPaths = ['/api/virustotal/lookup', '/api/abuseipdb/check', '/api/activedirectory/user', '/api/okta/user-risk', '/api/edr/endpoint', '/api/siem/search', '/api/m365/audit', '/api/cloudtrail/search', '/api/servicenow/ticket', '/api/jira/issue']
 await mkdir(output, { recursive: true })
+if (capturedInputFile) {
+  const prior = JSON.parse(await readFile(capturedInputFile, 'utf8'))
+  for (const path of ['/api/agent-run', ...toolPaths]) {
+    const response = prior.requests.find(item => item.label === 'desktop-live' && item.path === path && item.status === 200 && item.complete === true)
+    assert(response, `Captured successful complete production input is missing: ${path}`)
+    fixtures.set(path, { status: response.status, contentType: response.contentType || (path === '/api/agent-run' ? 'text/event-stream' : 'application/json'), body: response.body })
+  }
+  evidence.initialInputProvenance = { evidenceFile: capturedInputFile, deploymentId: prior.deploymentId, sourceCommit: prior.sourceCommit, capturedAt: prior.finished || prior.started, currentGenerationAndToolApiCalls: 0, note: 'Only initial scenario and ten tool responses are replayed. All analyst resume/report and alternate-analysis calls use the current deployed backend. Function digest comparison and fresh real-Chrome full generation belong to parent coordinator.' }
+}
 function record(requirement, method, details, status = 'PASS') {
   evidence.checks.push({ requirement, status, method, details })
   console.log(`${status}: ${requirement}`)
@@ -50,7 +60,7 @@ async function makePage(label, viewport, reuse = false, injectError = false, ret
   await context.exposeBinding('__verifyResponse', async (_source, captured) => {
     const { path, body, complete } = captured
     const fixtureInput = reuse && (path === '/api/agent-run' || toolPaths.includes(path))
-    const source = retryFixture && fixtureInput ? 'injected tool failure / captured recovery fixture' : fixtureInput ? 'captured production input replayed locally' : injectError ? 'injected error fixture' : 'live production'
+    const source = retryFixture && fixtureInput ? 'injected tool failure / captured recovery fixture' : fixtureInput ? `captured production input replayed locally (origin deploy ${evidence.initialInputProvenance?.deploymentId || evidence.deploymentId || 'current initial run'})` : injectError ? 'injected error fixture' : 'live production'
     let entry = evidence.requests.find(item => item.label === label && item.captureId === captured.captureId)
     if (!entry) { entry = { label, ...captured, source, captureMethod: 'in-page fetch response clone, same network request' }; evidence.requests.push(entry) }
     else Object.assign(entry, captured)
@@ -179,7 +189,9 @@ async function readyApproval(page, label) {
 async function reportAndExport(page, label) {
   await reveal(page, /report/i)
   const report = page.locator('#final-report')
-  await report.getByText('Executive Summary', { exact: true }).waitFor({ timeout: 180_000 })
+  await page.waitForFunction(() => document.querySelector('.errorBanner') || [...document.querySelectorAll('#final-report h3')].some(heading => heading.textContent.trim() === 'Executive Summary'), null, { timeout: 90_000 })
+  if (await page.locator('.errorBanner').count()) throw new Error(`${label}: ${await page.locator('.errorBanner').innerText()}`)
+  await report.getByText('Executive Summary', { exact: true }).waitFor()
   const reportText = await report.innerText()
   for (const title of ['Executive Summary', 'Root Cause', 'MITRE Mapping', 'Investigation Timeline', 'Agent Routing & Cycles', 'Containment Actions', 'Recommendations', 'Analyst Decisions', 'Tool Result Summary']) assert(reportText.includes(title), `Missing report section: ${title}`)
   assert(!reportText.includes('No report entries captured.'), 'Empty report sections')
@@ -217,7 +229,7 @@ try {
     assert.equal(response.status, 405, `${path}: GET should reject without paid work`)
   }
   record('API method validation', 'production API; no paid request', 'GET rejected with 405 on all execution endpoints')
-  const desktop = await makePage(live ? 'desktop-live' : 'desktop-read-only', { width: 1440, height: 900 })
+  const desktop = await makePage(live ? 'desktop-live' : 'desktop-read-only', { width: 1440, height: 900 }, Boolean(capturedInputFile))
   await layout(desktop, 'desktop-initial')
   await tabs(desktop, 'desktop-initial')
   const brand = desktop.getByRole('link', { name: /Sentinel investigation workspace/i })
@@ -241,12 +253,12 @@ try {
     await start(desktop)
     await readyApproval(desktop, 'desktop-live')
     const initial = sse(fixtures.get('/api/agent-run').body)
-    record('Initial SSE terminal state', 'in-page clone of real production response', { terminalDone: initial.some(item => item.event === 'done'), eventCount: initial.length, transportErrors: evidence.errors.filter(item => item.url?.endsWith('/api/agent-run') || item.path === '/api/agent-run') })
+    record('Initial SSE terminal state', capturedInputFile ? 'captured prior production SSE replayed through current UI' : 'in-page clone of real production response', { terminalDone: initial.some(item => item.event === 'done'), eventCount: initial.length, provenance: evidence.initialInputProvenance, transportErrors: evidence.errors.filter(item => item.url?.endsWith('/api/agent-run') || item.path === '/api/agent-run') })
     assert(initial.some(item => item.event === 'done'), 'Initial generation response did not include terminal done event')
     const incidentAudit = initial.find(item => item.event === 'api_call' && item.data.type === 'llm')?.data
     const auditRows = [validateModel(incidentAudit, 'incident generation')]
     for (const path of toolPaths) auditRows.push(validateModel(JSON.parse(fixtures.get(path).body).llmAudit, path))
-    record('Real incident and ten synthetic tool model calls', 'production API response/audit', auditRows)
+    record(capturedInputFile ? 'Prior real incident and ten tool audits supplied to current UI' : 'Real incident and ten synthetic tool model calls', capturedInputFile ? 'captured successful production API inputs; no current generation/tool calls' : 'production API response/audit', { audits: auditRows, provenance: evidence.initialInputProvenance })
     assert(initial.some(item => item.event === 'agent_route' && item.data.kind === 'backtrack'), 'No actual cyclic routing event')
     await tabs(desktop, 'desktop-approval')
     await reveal(desktop, /evidence|api|audit/i)
@@ -376,7 +388,7 @@ try {
   evidence.livePostsByEndpoint = Object.fromEntries(endpointCalls)
   await writeFile(join(output, `${prefix}-evidence.json`), JSON.stringify(evidence, null, 2))
   const rows = evidence.checks.map(item => `| ${item.requirement} | ${item.status} | ${item.method} | ${JSON.stringify(item.details).replaceAll('|', '\\|').replaceAll('\n', ' ').slice(0, 1000)} |`).join('\n')
-  await writeFile(join(output, `${prefix}-evidence-matrix.md`), `# SOC verification evidence\n\nURL: ${baseUrl}\n\nStarted: ${evidence.started}\n\nFinished: ${evidence.finished}\n\nMode: ${evidence.mode}. Real Chrome: ${evidence.manualChrome}.\n\nLive POSTs: ${evidence.livePostCount}/${evidence.paidRequestCap}. No top-ups. Dollar spend is not inferred from tokens; see provider billing if exact cost is needed.\n\n| Requirement | Result | Evidence source | Details |\n|---|---|---|---|\n${rows}\n\nFull response evidence, request provenance, and console/network results: ${prefix}-evidence.json.\n`)
+  await writeFile(join(output, `${prefix}-evidence-matrix.md`), `# SOC verification evidence\n\nURL: ${baseUrl}\n\nCurrent deployment: ${evidence.deploymentId}; source: ${evidence.sourceCommit}.\n\nStarted: ${evidence.started}\n\nFinished: ${evidence.finished}\n\nMode: ${evidence.mode}. Real Chrome: ${evidence.manualChrome}.\n\nInitial scenario/tool input provenance: ${JSON.stringify(evidence.initialInputProvenance || 'Generated live on this deployment during this run')}.\n\nLive POSTs: ${evidence.livePostCount}/${evidence.paidRequestCap}. No top-ups. Dollar spend is not inferred from tokens; see provider billing if exact cost is needed.\n\n| Requirement | Result | Evidence source | Details |\n|---|---|---|---|\n${rows}\n\nFull response evidence, request provenance, and console/network results: ${prefix}-evidence.json.\n`)
   await browser.close()
   console.log(JSON.stringify({ output, mode: evidence.mode, livePostCount: evidence.livePostCount, failures: evidence.checks.filter(item => item.status === 'FAIL').length }))
 }
