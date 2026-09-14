@@ -1,5 +1,28 @@
+// netlify/lib/provider.ts
+function envValue(name) {
+  return globalThis.Netlify?.env.get(name);
+}
+function getProvider(role = "primary", requireKey = true) {
+  const selected = envValue("AI_PROVIDER") || (envValue("DEEPSEEK_API_KEY") ? "deepseek" : "glm");
+  if (!["deepseek", "glm"].includes(selected)) throw new Error("AI_PROVIDER must be deepseek or glm");
+  const deepseek = selected === "deepseek";
+  const prefix = deepseek ? "DEEPSEEK" : "GLM";
+  const apiKey = envValue(`${prefix}_API_KEY`);
+  if (requireKey && !apiKey) throw new Error(`${prefix}_API_KEY is not configured`);
+  const model = envValue(`${prefix}_${role === "tool" ? "TOOL_MODEL" : "MODEL"}`) || envValue(`${prefix}_MODEL`) || (deepseek ? "deepseek-flash" : role === "tool" ? "glm-5-turbo" : "glm-5.1");
+  return {
+    id: selected,
+    provider: deepseek ? "DeepSeek" : "Z.ai",
+    toolName: deepseek ? "DeepSeek" : "GLM",
+    apiKey,
+    model,
+    baseUrl: (envValue(`${prefix}_BASE_URL`) || (deepseek ? "https://api.deepseek.com" : "https://api.z.ai/api/coding/paas/v4")).replace(/\/$/, "")
+  };
+}
+
+// netlify/functions-src/agent-run.mts
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-const toolEndpoints = [
+var toolEndpoints = [
   { name: "VirusTotal", endpoint: "/api/virustotal/lookup", agent: "Enrichment Agent" },
   { name: "AbuseIPDB", endpoint: "/api/abuseipdb/check", agent: "Enrichment Agent" },
   { name: "Active Directory", endpoint: "/api/activedirectory/user", agent: "Identity Investigation Agent" },
@@ -11,7 +34,7 @@ const toolEndpoints = [
   { name: "ServiceNow", endpoint: "/api/servicenow/ticket", agent: "Ticketing Agent" },
   { name: "Jira", endpoint: "/api/jira/issue", agent: "Ticketing Agent" }
 ];
-const cycleId = "cycle-investigation";
+var cycleId = "cycle-investigation";
 function defaultRoutingPlan(incident) {
   const identity = incident.affectedUser ?? "affected user";
   const host = incident.affectedHost ?? "affected host";
@@ -115,20 +138,16 @@ function defaultRoutingPlan(incident) {
     }
   ];
 }
-const rateLimitWindowMs = 6e4;
-const rateLimitMaxRequests = 18;
-const runtimeState = globalThis;
-function envValue(name) {
-  const netlify = globalThis.Netlify;
-  return netlify?.env?.get?.(name) ?? process.env[name];
-}
+var rateLimitWindowMs = 6e4;
+var rateLimitMaxRequests = 18;
+var runtimeState = globalThis;
 function extractJson(text) {
   const direct = text.trim();
   try {
     return JSON.parse(direct);
   } catch {
     const match = direct.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error("GLM response did not include JSON");
+    if (!match) throw new Error("Model response did not include JSON");
     return JSON.parse(match[0]);
   }
 }
@@ -139,7 +158,7 @@ function parseProviderResponse(text) {
     return { rawText: text };
   }
 }
-const sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
+var sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
 function sanitizeForLog(value, depth = 0) {
   if (depth > 12) return "[MaxDepth]";
   if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
@@ -242,16 +261,11 @@ function rateLimit(req) {
   }
   return void 0;
 }
-function requiredKey() {
-  const apiKey = envValue("GLM_API_KEY");
-  if (!apiKey) throw new Error("GLM_API_KEY is not configured");
-  return apiKey;
-}
 function requestTimeout(name, fallbackMs) {
   const configured = Number(envValue(name));
   return Number.isFinite(configured) && configured > 0 ? configured : fallbackMs;
 }
-async function callGlmJson({
+async function callModelJson({
   node,
   prompt,
   temperature = 0.82,
@@ -260,9 +274,8 @@ async function callGlmJson({
   streamDeltas = false,
   modelName
 }) {
-  const apiKey = requiredKey();
-  const model = modelName || envValue("GLM_MODEL") || "glm-5.1";
-  const baseUrl = envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
+  const { apiKey, provider, toolName, baseUrl, model: configuredModel } = getProvider();
+  const model = modelName || configuredModel;
   const endpointPath = "/chat/completions";
   const body = {
     model,
@@ -289,15 +302,15 @@ async function callGlmJson({
         "content-type": "application/json",
         "accept-language": "en-US,en"
       },
-      signal: AbortSignal.timeout(requestTimeout("GLM_ORCHESTRATION_TIMEOUT_MS", 24e3)),
+      signal: AbortSignal.timeout(requestTimeout("MODEL_TIMEOUT_MS", 4e4)),
       body: JSON.stringify(body)
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "GLM request failed before response";
+    const message = error instanceof Error ? error.message : "Model request failed before response";
     send("api_call", makeLlmAuditLog({
       callerAgent: node,
-      provider: "z.ai",
-      toolName: "GLM-5.1",
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -315,8 +328,8 @@ async function callGlmJson({
     if (!response.ok) {
       send("api_call", makeLlmAuditLog({
         callerAgent: node,
-        provider: "z.ai",
-        toolName: "GLM-5.1",
+        provider,
+        toolName,
         model,
         baseUrl,
         endpointPath,
@@ -328,20 +341,20 @@ async function callGlmJson({
         statusCode: response.status,
         statusText: response.statusText,
         ok: false,
-        errorMessage: `GLM ${response.status}: ${text.slice(0, 240)}`
+        errorMessage: `${provider} ${response.status}: ${text.slice(0, 240)}`
       }));
-      throw new Error(`GLM ${response.status}: ${text.slice(0, 240)}`);
+      throw new Error(`${provider} ${response.status}: ${text.slice(0, 240)}`);
     }
     const content2 = parsed?.choices?.[0]?.message?.content ?? "{}";
     let result2;
     try {
       result2 = extractJson(content2);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "GLM response parse failed";
+      const message = error instanceof Error ? error.message : "Model response parse failed";
       send("api_call", makeLlmAuditLog({
         callerAgent: node,
-        provider: "z.ai",
-        toolName: "GLM-5.1",
+        provider,
+        toolName,
         model,
         baseUrl,
         endpointPath,
@@ -359,8 +372,8 @@ async function callGlmJson({
     }
     const log2 = makeLlmAuditLog({
       callerAgent: node,
-      provider: "z.ai",
-      toolName: "GLM-5.1",
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -382,8 +395,8 @@ async function callGlmJson({
     const text = await response.text().catch(() => "");
     send("api_call", makeLlmAuditLog({
       callerAgent: node,
-      provider: "z.ai",
-      toolName: "GLM-5.1",
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -394,9 +407,9 @@ async function callGlmJson({
       statusCode: response.status,
       statusText: response.statusText,
       ok: false,
-      errorMessage: `GLM stream failed ${response.status}: ${text.slice(0, 240)}`
+      errorMessage: `Model stream failed ${response.status}: ${text.slice(0, 240)}`
     }));
-    throw new Error(`GLM stream failed ${response.status}: ${text.slice(0, 240)}`);
+    throw new Error(`Model stream failed ${response.status}: ${text.slice(0, 240)}`);
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -427,11 +440,11 @@ async function callGlmJson({
   try {
     result = extractJson(content);
   } catch (error) {
-    const message = error instanceof Error ? error.message : "GLM stream response parse failed";
+    const message = error instanceof Error ? error.message : "Model stream response parse failed";
     send("api_call", makeLlmAuditLog({
       callerAgent: node,
-      provider: "z.ai",
-      toolName: "GLM-5.1",
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -449,8 +462,8 @@ async function callGlmJson({
   }
   const log = makeLlmAuditLog({
     callerAgent: node,
-    provider: "z.ai",
-    toolName: "GLM-5.1",
+    provider,
+    toolName,
     model,
     baseUrl,
     endpointPath,
@@ -673,14 +686,14 @@ async function runCyclicInvestigationGraph({
 Create a complex multi-stage enterprise SOC incident with identity+endpoint+cloud+email+SIEM evidence, conflicting signals, two departments, MITRE mapping, IOCs, and one-line raw log. Keep strings compact.
 i fields: incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet.
 a={actionName,target,toolArguments,riskJustification}.`;
-    const orchestratedRun = await callGlmJson({
+    const orchestratedRun = await callModelJson({
       node: "Supervisor Graph Orchestrator",
       prompt: orchestrationPrompt,
       temperature: 0.92,
-      maxTokens: 340,
+      maxTokens: 1e3,
       send,
       streamDeltas: false,
-      modelName: envValue("GLM_TOOL_MODEL") || "glm-5-turbo"
+      modelName: getProvider("tool").model
     });
     const streamPreview = JSON.stringify(orchestratedRun.result);
     for (let index = 0; index < streamPreview.length; index += 96) {
@@ -810,7 +823,7 @@ a={actionName,target,toolArguments,riskJustification}.`;
       }
     };
     checkpoint("containment_interrupt", { approval, routeDecision: state.routeDecision }, send);
-    timeline("Containment paused", "LangGraph interrupt surfaced a human approval card after cyclic routing.", "warning", send);
+    timeline("Containment paused", "Graph execution reached the approval boundary. The browser keeps the snapshot for a separate stateless continuation.", "warning", send);
     send("approval_required", approval);
     send("node_complete", { node: "containment", timestamp: (/* @__PURE__ */ new Date()).toISOString(), durationMs: 0 });
     return { approval };
@@ -844,7 +857,7 @@ data: ${JSON.stringify(data)}
       const runId = `run-${crypto.randomUUID().slice(0, 8)}`;
       const threadId = `thread-${crypto.randomUUID().slice(0, 12)}`;
       try {
-        requiredKey();
+        getProvider();
         await runCyclicInvestigationGraph({ runId, threadId, startedAt, send });
         send("done", {});
       } catch (error) {
@@ -876,7 +889,7 @@ data: ${JSON.stringify(data)}
     }
   });
 };
-const config = {
+var config = {
   path: "/api/agent-run"
 };
 export {

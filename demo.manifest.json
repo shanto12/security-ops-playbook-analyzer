@@ -1,6 +1,6 @@
 {
   "slug": "security-ops-playbook-analyzer",
-  "publicTitle": "SOC AI Agent Demo",
+  "publicTitle": "Sentinel \u2014 SOC Investigation Workspace",
   "targetCompany": "Public security automation demo",
   "targetRole": "SOC automation / AI security engineer",
   "archetype": "security-ops-simulator",

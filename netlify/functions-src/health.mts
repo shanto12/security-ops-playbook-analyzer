@@ -1,58 +1,52 @@
 import type { Config } from '@netlify/functions'
-
-function envValue(name: string): string | undefined {
-  const netlify = (globalThis as any).Netlify
-  return netlify?.env?.get?.(name) ?? process.env[name]
-}
+import { getProvider } from '../lib/provider'
 
 export default async () => {
-  const hasKey = Boolean(envValue('GLM_API_KEY'))
-  const model = envValue('GLM_MODEL') || 'glm-5.1'
-  const toolModel = envValue('GLM_TOOL_MODEL') || 'glm-5-turbo'
-  const endpoint = envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
-
+  const config = getProvider('primary', false)
+  const toolConfig = getProvider('tool', false)
+  let reachable = false
+  let detail = 'API key is not configured.'
+  if (config.apiKey) {
+    try {
+      // An authenticated metadata probe checks reachability without charging a generation.
+      const response = await fetch(`${config.baseUrl}/models`, {
+        headers: { authorization: `Bearer ${config.apiKey}` },
+        signal: AbortSignal.timeout(7000),
+      })
+      const body = await response.json() as { data?: { id: string }[] }
+      reachable = response.ok && Array.isArray(body.data) && body.data.some((item: { id: string }) => item.id === config.model)
+      detail = reachable ? 'Model catalog verified. Generation quota is checked when a run starts.' : `Provider unavailable or model not listed (HTTP ${response.status}).`
+    } catch {
+      detail = 'Provider reachability check failed. Try again shortly.'
+    }
+  }
   return Response.json({
     service: 'soc-ai-agent-demo',
-    status: hasKey ? 'ok' : 'degraded',
-    mode: hasKey ? 'live-glm' : 'missing-key',
-    provider: 'z.ai',
-    model,
-    toolModel,
-    orchestrationProvider: 'z.ai',
-    fireworksModel: null,
-    endpoint,
+    status: reachable ? 'ok' : 'degraded',
+    mode: reachable ? `live-${config.id}` : config.apiKey ? 'unavailable' : 'missing-key',
+    provider: config.provider,
+    model: config.model,
+    toolModel: toolConfig.model,
+    orchestrationProvider: config.provider,
+    endpoint: config.baseUrl,
+    healthDetail: detail,
     checkedAt: new Date().toISOString(),
     capabilities: {
-      incident_generation: hasKey,
-      glm_tool_responses: hasKey,
-      fireworks_orchestration: false,
+      incident_generation: reachable,
+      synthetic_tool_responses: reachable,
       real_langgraph_stategraph: true,
       cyclic_back_edges: true,
       sse_streaming: true,
-      hitl_interrupt_resume: true,
-      checkpoint_replay: true,
-      enterprise_tool_endpoints: true,
+      analyst_approval_continuation: true,
+      native_langgraph_interrupt_resume: false,
+      snapshot_alternate_analysis: true,
+      native_checkpoint_replay: false,
+      enterprise_tool_endpoints: false,
+      synthetic_tool_endpoints: true,
       api_transparency_log: true,
       downloadable_report: true,
     },
-    models: [
-      'glm-5.1',
-      'glm-5-turbo',
-      'glm-5',
-      'glm-4.7',
-      'glm-4.7-flash',
-      'glm-4.7-flashx',
-      'glm-4.6',
-      'glm-4.5',
-      'glm-4.5-air',
-      'glm-4.5-x',
-      'glm-4.5-airx',
-      'glm-4.5-flash',
-      'glm-4-32b-0414-128k',
-    ],
-  })
+    models: [config.model],
+  }, { headers: { 'cache-control': 'no-store' } })
 }
-
-export const config: Config = {
-  path: '/api/health',
-}
+export const config: Config = { path: '/api/health' }

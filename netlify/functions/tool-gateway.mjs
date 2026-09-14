@@ -1,4 +1,27 @@
-const toolSpecs = {
+// netlify/lib/provider.ts
+function envValue(name) {
+  return globalThis.Netlify?.env.get(name);
+}
+function getProvider(role = "primary", requireKey = true) {
+  const selected = envValue("AI_PROVIDER") || (envValue("DEEPSEEK_API_KEY") ? "deepseek" : "glm");
+  if (!["deepseek", "glm"].includes(selected)) throw new Error("AI_PROVIDER must be deepseek or glm");
+  const deepseek = selected === "deepseek";
+  const prefix = deepseek ? "DEEPSEEK" : "GLM";
+  const apiKey = envValue(`${prefix}_API_KEY`);
+  if (requireKey && !apiKey) throw new Error(`${prefix}_API_KEY is not configured`);
+  const model = envValue(`${prefix}_${role === "tool" ? "TOOL_MODEL" : "MODEL"}`) || envValue(`${prefix}_MODEL`) || (deepseek ? "deepseek-flash" : role === "tool" ? "glm-5-turbo" : "glm-5.1");
+  return {
+    id: selected,
+    provider: deepseek ? "DeepSeek" : "Z.ai",
+    toolName: deepseek ? "DeepSeek" : "GLM",
+    apiKey,
+    model,
+    baseUrl: (envValue(`${prefix}_BASE_URL`) || (deepseek ? "https://api.deepseek.com" : "https://api.z.ai/api/coding/paas/v4")).replace(/\/$/, "")
+  };
+}
+
+// netlify/functions-src/tool-gateway.mts
+var toolSpecs = {
   "/api/virustotal/lookup": {
     name: "VirusTotal",
     path: "/api/virustotal/lookup",
@@ -98,7 +121,7 @@ const toolSpecs = {
     schemaHint: "Return accountId, region, events, sourceIPAddress, userIdentity, apiCalls, and guardrailFindings."
   }
 };
-const toolAliases = {
+var toolAliases = {
   virustotal: "/api/virustotal/lookup",
   abuseipdb: "/api/abuseipdb/check",
   activedirectory: "/api/activedirectory/user",
@@ -114,10 +137,6 @@ const toolAliases = {
   m365: "/api/m365/audit",
   cloudtrail: "/api/cloudtrail/search"
 };
-function envValue(name) {
-  const netlify = globalThis.Netlify;
-  return netlify?.env?.get?.(name) ?? process.env[name];
-}
 function jsonResponse(status, body) {
   return Response.json(body, {
     status,
@@ -130,7 +149,7 @@ function extractJson(text) {
     return JSON.parse(direct);
   } catch {
     const match = direct.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error("GLM response did not include JSON");
+    if (!match) throw new Error("Model response did not include JSON");
     return JSON.parse(match[0]);
   }
 }
@@ -141,7 +160,7 @@ function parseProviderResponse(text) {
     return { rawText: text };
   }
 }
-const sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
+var sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
 function sanitizeForLog(value, depth = 0) {
   if (depth > 12) return "[MaxDepth]";
   if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
@@ -156,24 +175,21 @@ function sanitizeForLog(value, depth = 0) {
     ])
   );
 }
-async function callGlm(spec, payload) {
-  const apiKey = envValue("GLM_API_KEY");
-  if (!apiKey) throw new Error("GLM_API_KEY is not configured");
-  const model = envValue("GLM_TOOL_MODEL") || "glm-5-turbo";
-  const baseUrl = envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
+async function callModel(spec, payload) {
+  const { apiKey, provider, toolName, model, baseUrl } = getProvider("tool");
   const endpointUrl = `${baseUrl}/chat/completions`;
   const incidentId = payload?.incident?.incidentId ?? payload?.incidentId ?? "unknown";
   const requestBody = {
     model,
     thinking: { type: "disabled" },
     temperature: 0.88,
-    max_tokens: 260,
+    max_tokens: 600,
     stream: false,
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: `You are ${spec.name}, an enterprise security/corporate tool API. Return compact valid JSON. Do not use markdown. Do not wrap the answer in an "answer" field. Use concrete top-level keys from the requested schema hint. Produce a realistic but synthetic response. Vary every response using the incident ID, timestamp, and provided indicators. Never say you are an AI.`
+        content: `You are ${spec.name}, an enterprise security/corporate tool API. Return compact valid JSON. Do not use markdown. Do not wrap the answer in an "answer" field. Use concrete top-level keys from the requested schema hint. Produce a realistic but synthetic response. Vary every response using the incident ID, timestamp, and provided indicators. These are simulated tool records for a public demo, never real vendor results.`
       },
       {
         role: "user",
@@ -204,12 +220,13 @@ async function callGlm(spec, payload) {
         "content-type": "application/json",
         "accept-language": "en-US,en"
       },
+      signal: AbortSignal.timeout(4e4),
       body: JSON.stringify(requestBody)
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "GLM request failed before response";
+    const message = error instanceof Error ? error.message : "Model request failed before response";
     const requestPayload = sanitizeForLog({
-      provider: "z.ai",
+      provider,
       model,
       baseUrl,
       endpointPath: "/chat/completions",
@@ -221,15 +238,15 @@ async function callGlm(spec, payload) {
       id: crypto.randomUUID(),
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       callerAgent: `${spec.name} Tool Simulator`,
-      toolName: "GLM-5.1",
-      provider: "z.ai",
+      toolName,
+      provider,
       model,
       baseUrl,
       method: "POST",
       endpointUrl,
       requestPayload,
       responsePayload: sanitizeForLog({
-        provider: "z.ai",
+        provider,
         model,
         raw: null,
         error: message
@@ -250,14 +267,14 @@ async function callGlm(spec, payload) {
     id: crypto.randomUUID(),
     timestamp: (/* @__PURE__ */ new Date()).toISOString(),
     callerAgent: `${spec.name} Tool Simulator`,
-    toolName: "GLM-5.1",
-    provider: "z.ai",
+    toolName,
+    provider,
     model: data?.model ?? model,
     baseUrl,
     method: "POST",
     endpointUrl,
     requestPayload: sanitizeForLog({
-      provider: "z.ai",
+      provider,
       model,
       baseUrl,
       endpointPath: "/chat/completions",
@@ -268,7 +285,7 @@ async function callGlm(spec, payload) {
     rawResponsePayload: sanitizeForLog(data),
     parsedResponsePayload: sanitizeForLog(result2),
     responsePayload: sanitizeForLog({
-      provider: "z.ai",
+      provider,
       model: data?.model ?? model,
       statusCode: response.status,
       statusText: response.statusText,
@@ -288,7 +305,7 @@ async function callGlm(spec, payload) {
     type: response.ok ? "llm" : "error"
   });
   if (!response.ok) {
-    const error = new Error(`GLM ${response.status}: ${text.slice(0, 220)}`);
+    const error = new Error(`${provider} ${response.status}: ${text.slice(0, 220)}`);
     error.llmAudit = makeAudit(void 0, error.message);
     throw error;
   }
@@ -297,7 +314,7 @@ async function callGlm(spec, payload) {
   try {
     result = extractJson(content);
   } catch (error) {
-    const parseError = error instanceof Error ? error : new Error("GLM response parse failed");
+    const parseError = error instanceof Error ? error : new Error("Model response parse failed");
     parseError.llmAudit = makeAudit(void 0, parseError.message, content);
     throw parseError;
   }
@@ -323,9 +340,11 @@ var tool_gateway_default = async (req) => {
     return jsonResponse(400, { error: "Expected JSON body" });
   }
   try {
-    const generated = await callGlm(spec, payload);
+    const generated = await callModel(spec, payload);
     return jsonResponse(200, {
       tool: spec.name,
+      synthetic: true,
+      provider: getProvider("tool").provider,
       endpoint: spec.path,
       generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       incidentId: payload?.incident?.incidentId ?? payload?.incidentId,
@@ -345,7 +364,7 @@ var tool_gateway_default = async (req) => {
     });
   }
 };
-const config = {
+var config = {
   path: Object.keys(toolSpecs)
 };
 export {

@@ -28,13 +28,14 @@ export interface LlmEvidence {
 export interface HealthResponse {
   service: string
   status: 'ok' | 'degraded'
-  mode: 'live-glm' | 'missing-key'
+  mode: 'live-glm' | 'live-deepseek' | 'missing-key' | 'unavailable'
   provider: string
   model: string
   toolModel?: string
   orchestrationProvider?: string
   fireworksModel?: string | null
   endpoint: string
+  healthDetail?: string
   checkedAt: string
   capabilities: Record<string, boolean>
   models: string[]

@@ -1,79 +1,51 @@
-# SOC AI Agent Demo
+# Sentinel — SOC investigation workspace
 
-Enterprise-grade single-page demo showing an AI-driven SOC incident investigation with visible LangGraph concepts: supervisor routing, specialist subgraphs, checkpointing, interrupt/resume, time travel, Send-style parallel supersteps, map-reduce evidence gathering, streaming, and an API transparency log.
+A public portfolio lab that turns a synthetic security alert into a transparent investigation, an analyst decision, and a downloadable report. The UI separates the case overview, execution graph, evidence/replay, and report so the analyst can follow one stage at a time.
 
-Independent concept demo. Synthetic incident data only.
+- [Live application](https://security-ops-playbook-analyzer.netlify.app)
+- [Source](https://github.com/shanto12/security-ops-playbook-analyzer)
 
-- Live app: https://security-ops-playbook-analyzer.netlify.app
-- GitHub: https://github.com/shanto12/security-ops-playbook-analyzer
+## What actually runs
 
-## Live Workflow
+The initial investigation executes a real `@langchain/langgraph` StateGraph with cyclic edges. DeepSeek Flash generates the incident, ten synthetic tool responses, the final report, and alternate checkpoint analysis. Model requests and responses are recorded with actual provider, model, latency, usage, and status. Z.ai remains an optional configured provider.
 
-1. Click **Generate Incident**.
-2. The hosted graph provider generates a unique incident and streams graph events over SSE.
-3. The supervisor and triage agents route the run.
-4. The hosted graph emits ten enterprise tool-call records in a Send-style superstep; each enterprise endpoint is also independently callable as a real GLM-backed HTTP route.
-5. Containment pauses for analyst approval.
-6. Approve, reject, or edit the action.
-7. The resume function completes containment, ticketing, notification, and the final report.
-8. Fork any checkpoint to demonstrate time-travel debugging.
-9. Export the run as JSON or open a browser-native print/save-to-PDF report.
+The enterprise system names are **simulated interfaces**. There are no connections to a real SIEM, EDR, directory, ticketing system, firewall, or Slack account. Approval records a demo decision; containment, ticketing, and notifications are synthesized locally. Specialist routes use a predefined cyclic plan unless the model supplies a routing plan.
 
-## Enterprise Tool Endpoints
+Checkpoints live in the browser session, not a durable shared database. Resume is a separate stateless function using the submitted checkpoint context; replay asks the model for an alternate branch analysis. They are not a persistent LangGraph checkpointer/Command replay service. Reloading clears the current investigation.
 
-Each endpoint is a real Netlify Function route that calls Z.ai to synthesize fresh structured JSON.
+## Try the workflow
 
-- `/api/virustotal/lookup`
-- `/api/abuseipdb/check`
-- `/api/activedirectory/user`
-- `/api/servicenow/ticket`
-- `/api/jira/issue`
-- `/api/siem/search`
-- `/api/shodan/host`
-- `/api/firewall/block`
-- `/api/edr/endpoint`
-- `/api/slack/notify`
-- `/api/whois/lookup`
-- `/api/okta/user-risk`
-- `/api/m365/audit`
-- `/api/cloudtrail/search`
+1. Choose **Generate Incident** or **Start first investigation**.
+2. Follow the execution stages and ten synthetic evidence requests.
+3. Inspect graph nodes, handoffs, checkpoint state, and API audit details.
+4. Approve, reject, or edit the simulated containment request.
+5. Read the final report, export the evidence as JSON, or open the print/save-PDF view.
+6. Select a checkpoint and fork an alternate branch analysis.
 
 ## Configuration
 
-```bash
-GLM_API_KEY=<z.ai key>
-GLM_MODEL=glm-5.1
-GLM_TOOL_MODEL=glm-5-turbo
-GLM_BASE_URL=https://api.z.ai/api/coding/paas/v4
-FIREWORKS_API_KEY=<optional fireworks key>
-FIREWORKS_MODEL=accounts/fireworks/models/deepseek-v4-pro
-FIREWORKS_BASE_URL=https://api.fireworks.ai/inference/v1
-```
+See `.env.example`. Production credentials belong in Netlify environment variables. The browser never receives them. `AI_PROVIDER=deepseek` selects `deepseek-flash`; `AI_PROVIDER=glm` preserves the optional GLM configuration. Thinking is disabled and completion output is bounded. Failed tool requests are not automatically retried.
 
-The browser never receives provider keys. Local development reads them from environment variables; production stores them as Netlify environment variables.
+`GET /api/health` makes an authenticated model-catalog probe. It reports model reachability, explicitly **not** generation quota or an end-to-end successful run. Provider failures are surfaced in the workflow. Report-model failure does not emit a successful completion.
 
-## Commands
+## Development and verification
 
-```bash
-npm install
+```sh
+npm ci
 npm run verify
-npm run e2e
+npm audit --omit=dev
 npm run build
 ```
 
-For local function testing:
+Use `netlify dev` with credentials supplied securely to the local runtime to exercise Functions. For deployment, use the Netlify connector first. Generated `netlify/functions/*.mjs` bundles include the shared provider configuration; source lives in `netlify/functions-src/` and `netlify/lib/`.
 
-```bash
-GLM_API_KEY="$(security find-generic-password -s codex-zai-api-key -w)" \
-GLM_BASE_URL="https://api.z.ai/api/coding/paas/v4" \
-GLM_MODEL="glm-5.1" \
-npx netlify dev --offline --port 8888 --target-port 5176 --functions netlify/functions \
-  --command "npm run dev -- --host 127.0.0.1 --port 5176"
+```sh
+node scripts/verify-refresh.mjs        # Read-only production UI/header checks
+node scripts/verify-refresh.mjs --live # Bounded paid production verification
 ```
 
-## Verification
+The live suite caps generation POSTs, records real provider evidence, and reuses the first run's captured input for alternate decision paths. Historical May 2026 evidence in `docs/` describes the prior release and is not current proof.
 
-- `npm run verify`: lint, unit tests, TypeScript, production build.
-- `npm run e2e`: desktop and mobile first-viewport Playwright smoke.
-- `npm audit --omit=dev`: production dependency audit.
-- Live provider smoke tested locally and in production through `/api/health`, `/api/jira/issue`, `/api/agent-run`, `/api/resume-run`, and `/api/replay-run`.
+## Operational boundaries
+
+This is an unauthenticated public demonstration, not an enterprise security deployment. No login/password-manager workflow is applicable. Browser-session state is not durable or access controlled. The existing per-instance run limiter is best effort and is not a global spending cap. Set provider/account spending limits or add durable rate limiting before broader traffic. No top-ups are performed by the app.

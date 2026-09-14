@@ -1,9 +1,7 @@
+import { getProvider } from '../lib/provider'
 import type { Config } from '@netlify/functions'
 
-function envValue(name: string): string | undefined {
-  const netlify = (globalThis as any).Netlify
-  return netlify?.env?.get?.(name) ?? process.env[name]
-}
+
 
 function extractJson(text: string): any {
   const direct = text.trim()
@@ -258,11 +256,11 @@ function syntheticTool(name: string, endpoint: string, agent: string, payload: a
   return makeLog({
     callerAgent: agent,
     toolName: name,
-    method: 'POST',
+    method: 'SIMULATED',
     endpointUrl: endpoint,
-    requestPayload: payload,
-    responsePayload: body,
-    latencyMs: 120 + Math.floor(Math.random() * 140),
+    requestPayload: { ...payload, synthetic: true },
+    responsePayload: { ...body, synthetic: true },
+    latencyMs: 0,
     tokenCount: body?.usage?.total_tokens,
     status: 'ok',
     type: 'tool',
@@ -270,22 +268,12 @@ function syntheticTool(name: string, endpoint: string, agent: string, payload: a
 }
 
 async function modelReport(prompt: unknown, send: (event: string, data: unknown) => void) {
-  const useGlm = Boolean(envValue('GLM_API_KEY'))
-  const apiKey = useGlm ? envValue('GLM_API_KEY') : envValue('FIREWORKS_API_KEY')
-  if (!apiKey) throw new Error('No report model API key is configured')
-  const provider = useGlm ? 'z.ai' : 'fireworks'
-  const toolName = useGlm ? 'GLM-5.1' : 'Fireworks'
-  const model = useGlm
-    ? envValue('GLM_MODEL') || 'glm-5.1'
-    : envValue('FIREWORKS_MODEL') || 'accounts/fireworks/models/deepseek-v4-pro'
-  const baseUrl = useGlm
-    ? envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
-    : envValue('FIREWORKS_BASE_URL') || 'https://api.fireworks.ai/inference/v1'
+  const { apiKey, provider, toolName, model, baseUrl } = getProvider()
   const requestBody = {
     model,
     temperature: 0.72,
-    max_tokens: 620,
-    ...(useGlm ? { thinking: { type: 'disabled' } } : { reasoning_effort: 'none' }),
+    max_tokens: 1800,
+    thinking: { type: 'disabled' },
     response_format: { type: 'json_object' },
     messages: [
       {
@@ -303,8 +291,9 @@ async function modelReport(prompt: unknown, send: (event: string, data: unknown)
       headers: {
         authorization: `Bearer ${apiKey}`,
         'content-type': 'application/json',
-        ...(useGlm ? { 'accept-language': 'en-US,en' } : {}),
+        'accept-language': 'en-US,en',
       },
+      signal: AbortSignal.timeout(40_000),
       body: JSON.stringify(requestBody),
     })
   } catch (error) {
@@ -420,6 +409,18 @@ export default async (req: Request) => {
     return Response.json({ error: 'Expected JSON body' }, { status: 400 })
   }
 
+  if (!['approve', 'reject', 'edit'].includes(payload?.decision) || !payload?.approval?.incident) {
+    return Response.json({ error: 'A valid analyst decision and incident approval are required.' }, { status: 400 })
+  }
+  if (payload.decision === 'edit' && (!payload.editedArguments || typeof payload.editedArguments !== 'object' || Array.isArray(payload.editedArguments))) {
+    return Response.json({ error: 'Edited arguments must be a JSON object.' }, { status: 400 })
+  }
+  const effectiveArguments = payload.decision === 'edit' ? payload.editedArguments : payload.approval.toolArguments ?? {}
+  const effectiveTarget = payload.decision === 'edit'
+    ? effectiveArguments.target ?? effectiveArguments.host ?? effectiveArguments.hostname ?? payload.approval.target
+    : payload.approval.target
+  payload.approval = { ...payload.approval, target: effectiveTarget, toolArguments: effectiveArguments }
+
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event: string, data: unknown) => controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
@@ -428,7 +429,7 @@ export default async (req: Request) => {
         const incident = payload?.approval?.incident
         const decision = payload?.decision
         send('node_start', { node: 'containment', timestamp: new Date().toISOString() })
-        timeline('Command(resume=...) received', `Analyst decision: ${decision}`, decision === 'reject' ? 'warning' : 'success', send)
+        timeline('Analyst decision received', `Analyst decision: ${decision}`, decision === 'reject' ? 'warning' : 'success', send)
 
         const containmentPayload = {
           incident,
@@ -442,11 +443,13 @@ export default async (req: Request) => {
           logs.push(syntheticTool('Firewall', '/api/firewall/block', 'Containment Agent', containmentPayload, {
             ruleName: `block-${incident?.incidentId ?? 'incident'}`,
             action: 'preview_commit',
-            target: payload?.approval?.target,
+            target: effectiveTarget,
+            arguments: effectiveArguments,
           }))
           logs.push(syntheticTool('EDR', '/api/edr/endpoint', 'Containment Agent', containmentPayload, {
-            hostname: incident?.affectedHost,
-            containment: 'queued',
+            hostname: effectiveTarget,
+            durationMinutes: effectiveArguments.durationMinutes,
+            containment: 'simulated',
             processTreeCaptured: true,
           }))
           logs.push(syntheticTool('Active Directory', '/api/activedirectory/user', 'Containment Agent', containmentPayload, {
@@ -484,7 +487,7 @@ export default async (req: Request) => {
           }),
           syntheticTool('Slack', '/api/slack/notify', 'Notification Agent', ticketPayload, {
             channel: '#soc-war-room',
-            deliveryStatus: 'sent',
+            deliveryStatus: 'simulated',
             incidentId: incident?.incidentId,
           }),
           syntheticTool('Microsoft 365 Audit', '/api/m365/audit', 'Notification Agent', ticketPayload, {
@@ -532,6 +535,7 @@ export default async (req: Request) => {
               incident,
               decision,
               approval: payload.approval,
+              effectiveArguments,
               containmentResults: logs.map((log) => log.responsePayload),
               ticketingResults: ticketLogs.map((log) => log.responsePayload),
               priorToolResults,
@@ -551,8 +555,8 @@ export default async (req: Request) => {
             },
             send,
           )
-        } catch {
-          rawReport = fallbackReport
+        } catch (error) {
+          throw new Error(`Report generation failed. Your investigation evidence is preserved. ${error instanceof Error ? error.message : "Try again."}`, { cause: error })
         }
         const report = normalizeReport(rawReport, incident, decision, fallbackReport)
         if (report.agentRouting.length === 0) {

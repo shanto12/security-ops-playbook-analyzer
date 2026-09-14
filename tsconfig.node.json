@@ -2,7 +2,9 @@
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "target": "ES2023",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "module": "ESNext",
     "skipLibCheck": true,
     "moduleResolution": "Bundler",
@@ -10,7 +12,15 @@
     "isolatedModules": true,
     "moduleDetection": "force",
     "noEmit": true,
-    "strict": true
+    "strict": true,
+    "types": [
+      "node"
+    ]
   },
-  "include": ["vite.config.ts", "eslint.config.js", "playwright.config.ts", "netlify/functions-src/**/*.mts"]
+  "include": [
+    "vite.config.ts",
+    "eslint.config.js",
+    "playwright.config.ts",
+    "netlify/functions-src/**/*.mts"
+  ]
 }

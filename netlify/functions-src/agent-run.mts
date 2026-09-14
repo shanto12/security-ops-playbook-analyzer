@@ -1,3 +1,4 @@
+import { getProvider, envValue } from '../lib/provider'
 import type { Config } from '@netlify/functions'
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph'
 
@@ -166,10 +167,7 @@ const runtimeState = globalThis as typeof globalThis & {
   socRateLimit?: Map<string, { count: number; resetAt: number }>
 }
 
-function envValue(name: string): string | undefined {
-  const netlify = (globalThis as any).Netlify
-  return netlify?.env?.get?.(name) ?? process.env[name]
-}
+
 
 function extractJson(text: string): any {
   const direct = text.trim()
@@ -177,7 +175,7 @@ function extractJson(text: string): any {
     return JSON.parse(direct)
   } catch {
     const match = direct.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('GLM response did not include JSON')
+    if (!match) throw new Error('Model response did not include JSON')
     return JSON.parse(match[0])
   }
 }
@@ -325,18 +323,14 @@ function rateLimit(req: Request) {
   return undefined
 }
 
-function requiredKey() {
-  const apiKey = envValue('GLM_API_KEY')
-  if (!apiKey) throw new Error('GLM_API_KEY is not configured')
-  return apiKey
-}
+
 
 function requestTimeout(name: string, fallbackMs: number) {
   const configured = Number(envValue(name))
   return Number.isFinite(configured) && configured > 0 ? configured : fallbackMs
 }
 
-async function callGlmJson({
+async function callModelJson({
   node,
   prompt,
   temperature = 0.82,
@@ -353,9 +347,8 @@ async function callGlmJson({
   streamDeltas?: boolean
   modelName?: string
 }) {
-  const apiKey = requiredKey()
-  const model = modelName || envValue('GLM_MODEL') || 'glm-5.1'
-  const baseUrl = envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
+  const { apiKey, provider, toolName, baseUrl, model: configuredModel } = getProvider()
+  const model = modelName || configuredModel
   const endpointPath = '/chat/completions'
   const body = {
     model,
@@ -383,15 +376,15 @@ async function callGlmJson({
         'content-type': 'application/json',
         'accept-language': 'en-US,en',
       },
-      signal: AbortSignal.timeout(requestTimeout('GLM_ORCHESTRATION_TIMEOUT_MS', 24_000)),
+      signal: AbortSignal.timeout(requestTimeout('MODEL_TIMEOUT_MS', 40_000)),
       body: JSON.stringify(body),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'GLM request failed before response'
+    const message = error instanceof Error ? error.message : 'Model request failed before response'
     send('api_call', makeLlmAuditLog({
       callerAgent: node,
-      provider: 'z.ai',
-      toolName: 'GLM-5.1',
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -410,8 +403,8 @@ async function callGlmJson({
     if (!response.ok) {
       send('api_call', makeLlmAuditLog({
         callerAgent: node,
-        provider: 'z.ai',
-        toolName: 'GLM-5.1',
+        provider,
+        toolName,
         model,
         baseUrl,
         endpointPath,
@@ -423,20 +416,20 @@ async function callGlmJson({
         statusCode: response.status,
         statusText: response.statusText,
         ok: false,
-        errorMessage: `GLM ${response.status}: ${text.slice(0, 240)}`,
+        errorMessage: `${provider} ${response.status}: ${text.slice(0, 240)}`,
       }))
-      throw new Error(`GLM ${response.status}: ${text.slice(0, 240)}`)
+      throw new Error(`${provider} ${response.status}: ${text.slice(0, 240)}`)
     }
     const content = parsed?.choices?.[0]?.message?.content ?? '{}'
     let result: unknown
     try {
       result = extractJson(content)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'GLM response parse failed'
+      const message = error instanceof Error ? error.message : 'Model response parse failed'
       send('api_call', makeLlmAuditLog({
         callerAgent: node,
-        provider: 'z.ai',
-        toolName: 'GLM-5.1',
+        provider,
+        toolName,
         model,
         baseUrl,
         endpointPath,
@@ -454,8 +447,8 @@ async function callGlmJson({
     }
     const log = makeLlmAuditLog({
       callerAgent: node,
-      provider: 'z.ai',
-      toolName: 'GLM-5.1',
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -478,8 +471,8 @@ async function callGlmJson({
     const text = await response.text().catch(() => '')
     send('api_call', makeLlmAuditLog({
       callerAgent: node,
-      provider: 'z.ai',
-      toolName: 'GLM-5.1',
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -490,9 +483,9 @@ async function callGlmJson({
       statusCode: response.status,
       statusText: response.statusText,
       ok: false,
-      errorMessage: `GLM stream failed ${response.status}: ${text.slice(0, 240)}`,
+      errorMessage: `Model stream failed ${response.status}: ${text.slice(0, 240)}`,
     }))
-    throw new Error(`GLM stream failed ${response.status}: ${text.slice(0, 240)}`)
+    throw new Error(`Model stream failed ${response.status}: ${text.slice(0, 240)}`)
   }
 
   const reader = response.body.getReader()
@@ -528,11 +521,11 @@ async function callGlmJson({
   try {
     result = extractJson(content)
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'GLM stream response parse failed'
+    const message = error instanceof Error ? error.message : 'Model stream response parse failed'
     send('api_call', makeLlmAuditLog({
       callerAgent: node,
-      provider: 'z.ai',
-      toolName: 'GLM-5.1',
+      provider,
+      toolName,
       model,
       baseUrl,
       endpointPath,
@@ -550,8 +543,8 @@ async function callGlmJson({
   }
   const log = makeLlmAuditLog({
     callerAgent: node,
-    provider: 'z.ai',
-    toolName: 'GLM-5.1',
+    provider,
+    toolName,
     model,
     baseUrl,
     endpointPath,
@@ -823,14 +816,14 @@ async function runCyclicInvestigationGraph({
 Create a complex multi-stage enterprise SOC incident with identity+endpoint+cloud+email+SIEM evidence, conflicting signals, two departments, MITRE mapping, IOCs, and one-line raw log. Keep strings compact.
 i fields: incidentId,timestamp,severity,priorityScore,incidentType,affectedUser,affectedHost,affectedIp,affectedDepartment,mitreTactic,mitreTechnique,initialAlertSource,iocs{ip,hash,domain,url},rawLogSnippet.
 a={actionName,target,toolArguments,riskJustification}.`
-      const orchestratedRun = await callGlmJson({
+      const orchestratedRun = await callModelJson({
         node: 'Supervisor Graph Orchestrator',
         prompt: orchestrationPrompt,
         temperature: 0.92,
-        maxTokens: 340,
+        maxTokens: 1000,
         send,
         streamDeltas: false,
-        modelName: envValue('GLM_TOOL_MODEL') || 'glm-5-turbo',
+        modelName: getProvider('tool').model,
       })
       const streamPreview = JSON.stringify(orchestratedRun.result)
       for (let index = 0; index < streamPreview.length; index += 96) {
@@ -976,7 +969,7 @@ a={actionName,target,toolArguments,riskJustification}.`
         },
       }
       checkpoint('containment_interrupt', { approval, routeDecision: state.routeDecision }, send)
-      timeline('Containment paused', 'LangGraph interrupt surfaced a human approval card after cyclic routing.', 'warning', send)
+      timeline('Containment paused', 'Graph execution reached the approval boundary. The browser keeps the snapshot for a separate stateless continuation.', 'warning', send)
       send('approval_required', approval)
       send('node_complete', { node: 'containment', timestamp: new Date().toISOString(), durationMs: 0 })
       return { approval }
@@ -1023,7 +1016,7 @@ export default async (req: Request) => {
       const threadId = `thread-${crypto.randomUUID().slice(0, 12)}`
 
       try {
-        requiredKey()
+        getProvider()
         await runCyclicInvestigationGraph({ runId, threadId, startedAt, send })
         send('done', {})
       } catch (error) {

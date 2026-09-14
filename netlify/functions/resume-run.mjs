@@ -1,7 +1,26 @@
+// netlify/lib/provider.ts
 function envValue(name) {
-  const netlify = globalThis.Netlify;
-  return netlify?.env?.get?.(name) ?? process.env[name];
+  return globalThis.Netlify?.env.get(name);
 }
+function getProvider(role = "primary", requireKey = true) {
+  const selected = envValue("AI_PROVIDER") || (envValue("DEEPSEEK_API_KEY") ? "deepseek" : "glm");
+  if (!["deepseek", "glm"].includes(selected)) throw new Error("AI_PROVIDER must be deepseek or glm");
+  const deepseek = selected === "deepseek";
+  const prefix = deepseek ? "DEEPSEEK" : "GLM";
+  const apiKey = envValue(`${prefix}_API_KEY`);
+  if (requireKey && !apiKey) throw new Error(`${prefix}_API_KEY is not configured`);
+  const model = envValue(`${prefix}_${role === "tool" ? "TOOL_MODEL" : "MODEL"}`) || envValue(`${prefix}_MODEL`) || (deepseek ? "deepseek-flash" : role === "tool" ? "glm-5-turbo" : "glm-5.1");
+  return {
+    id: selected,
+    provider: deepseek ? "DeepSeek" : "Z.ai",
+    toolName: deepseek ? "DeepSeek" : "GLM",
+    apiKey,
+    model,
+    baseUrl: (envValue(`${prefix}_BASE_URL`) || (deepseek ? "https://api.deepseek.com" : "https://api.z.ai/api/coding/paas/v4")).replace(/\/$/, "")
+  };
+}
+
+// netlify/functions-src/resume-run.mts
 function extractJson(text) {
   const direct = text.trim();
   try {
@@ -19,7 +38,7 @@ function parseProviderResponse(text) {
     return { rawText: text };
   }
 }
-const sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
+var sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
 function sanitizeForLog(value, depth = 0) {
   if (depth > 12) return "[MaxDepth]";
   if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
@@ -210,29 +229,23 @@ function syntheticTool(name, endpoint, agent, payload, body) {
   return makeLog({
     callerAgent: agent,
     toolName: name,
-    method: "POST",
+    method: "SIMULATED",
     endpointUrl: endpoint,
-    requestPayload: payload,
-    responsePayload: body,
-    latencyMs: 120 + Math.floor(Math.random() * 140),
+    requestPayload: { ...payload, synthetic: true },
+    responsePayload: { ...body, synthetic: true },
+    latencyMs: 0,
     tokenCount: body?.usage?.total_tokens,
     status: "ok",
     type: "tool"
   });
 }
 async function modelReport(prompt, send) {
-  const useGlm = Boolean(envValue("GLM_API_KEY"));
-  const apiKey = useGlm ? envValue("GLM_API_KEY") : envValue("FIREWORKS_API_KEY");
-  if (!apiKey) throw new Error("No report model API key is configured");
-  const provider = useGlm ? "z.ai" : "fireworks";
-  const toolName = useGlm ? "GLM-5.1" : "Fireworks";
-  const model = useGlm ? envValue("GLM_MODEL") || "glm-5.1" : envValue("FIREWORKS_MODEL") || "accounts/fireworks/models/deepseek-v4-pro";
-  const baseUrl = useGlm ? envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4" : envValue("FIREWORKS_BASE_URL") || "https://api.fireworks.ai/inference/v1";
+  const { apiKey, provider, toolName, model, baseUrl } = getProvider();
   const requestBody = {
     model,
     temperature: 0.72,
-    max_tokens: 620,
-    ...useGlm ? { thinking: { type: "disabled" } } : { reasoning_effort: "none" },
+    max_tokens: 1800,
+    thinking: { type: "disabled" },
     response_format: { type: "json_object" },
     messages: [
       {
@@ -250,8 +263,9 @@ async function modelReport(prompt, send) {
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
-        ...useGlm ? { "accept-language": "en-US,en" } : {}
+        "accept-language": "en-US,en"
       },
+      signal: AbortSignal.timeout(4e4),
       body: JSON.stringify(requestBody)
     });
   } catch (error) {
@@ -363,6 +377,15 @@ var resume_run_default = async (req) => {
   } catch {
     return Response.json({ error: "Expected JSON body" }, { status: 400 });
   }
+  if (!["approve", "reject", "edit"].includes(payload?.decision) || !payload?.approval?.incident) {
+    return Response.json({ error: "A valid analyst decision and incident approval are required." }, { status: 400 });
+  }
+  if (payload.decision === "edit" && (!payload.editedArguments || typeof payload.editedArguments !== "object" || Array.isArray(payload.editedArguments))) {
+    return Response.json({ error: "Edited arguments must be a JSON object." }, { status: 400 });
+  }
+  const effectiveArguments = payload.decision === "edit" ? payload.editedArguments : payload.approval.toolArguments ?? {};
+  const effectiveTarget = payload.decision === "edit" ? effectiveArguments.target ?? effectiveArguments.host ?? effectiveArguments.hostname ?? payload.approval.target : payload.approval.target;
+  payload.approval = { ...payload.approval, target: effectiveTarget, toolArguments: effectiveArguments };
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event, data) => controller.enqueue(encoder.encode(`event: ${event}
@@ -374,7 +397,7 @@ data: ${JSON.stringify(data)}
         const incident = payload?.approval?.incident;
         const decision = payload?.decision;
         send("node_start", { node: "containment", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-        timeline("Command(resume=...) received", `Analyst decision: ${decision}`, decision === "reject" ? "warning" : "success", send);
+        timeline("Analyst decision received", `Analyst decision: ${decision}`, decision === "reject" ? "warning" : "success", send);
         const containmentPayload = {
           incident,
           decision,
@@ -387,11 +410,13 @@ data: ${JSON.stringify(data)}
           logs.push(syntheticTool("Firewall", "/api/firewall/block", "Containment Agent", containmentPayload, {
             ruleName: `block-${incident?.incidentId ?? "incident"}`,
             action: "preview_commit",
-            target: payload?.approval?.target
+            target: effectiveTarget,
+            arguments: effectiveArguments
           }));
           logs.push(syntheticTool("EDR", "/api/edr/endpoint", "Containment Agent", containmentPayload, {
-            hostname: incident?.affectedHost,
-            containment: "queued",
+            hostname: effectiveTarget,
+            durationMinutes: effectiveArguments.durationMinutes,
+            containment: "simulated",
             processTreeCaptured: true
           }));
           logs.push(syntheticTool("Active Directory", "/api/activedirectory/user", "Containment Agent", containmentPayload, {
@@ -426,7 +451,7 @@ data: ${JSON.stringify(data)}
           }),
           syntheticTool("Slack", "/api/slack/notify", "Notification Agent", ticketPayload, {
             channel: "#soc-war-room",
-            deliveryStatus: "sent",
+            deliveryStatus: "simulated",
             incidentId: incident?.incidentId
           }),
           syntheticTool("Microsoft 365 Audit", "/api/m365/audit", "Notification Agent", ticketPayload, {
@@ -471,6 +496,7 @@ data: ${JSON.stringify(data)}
               incident,
               decision,
               approval: payload.approval,
+              effectiveArguments,
               containmentResults: logs.map((log) => log.responsePayload),
               ticketingResults: ticketLogs.map((log) => log.responsePayload),
               priorToolResults,
@@ -490,8 +516,8 @@ data: ${JSON.stringify(data)}
             },
             send
           );
-        } catch {
-          rawReport = fallbackReport;
+        } catch (error) {
+          throw new Error(`Report generation failed. Your investigation evidence is preserved. ${error instanceof Error ? error.message : "Try again."}`, { cause: error });
         }
         const report = normalizeReport(rawReport, incident, decision, fallbackReport);
         if (report.agentRouting.length === 0) {
@@ -522,7 +548,7 @@ data: ${JSON.stringify(data)}
     }
   });
 };
-const config = {
+var config = {
   path: "/api/resume-run"
 };
 export {

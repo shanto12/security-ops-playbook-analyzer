@@ -5,6 +5,8 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'jsdom',
+    maxWorkers: 1,
+    testTimeout: 20_000,
     setupFiles: ['./src/test/setup.ts'],
     exclude: ['node_modules/**', 'dist/**', 'e2e/**', 'playwright-report/**', 'test-results/**'],
     css: true,

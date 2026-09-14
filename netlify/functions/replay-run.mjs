@@ -1,13 +1,32 @@
+// netlify/lib/provider.ts
 function envValue(name) {
-  const netlify = globalThis.Netlify;
-  return netlify?.env?.get?.(name) ?? process.env[name];
+  return globalThis.Netlify?.env.get(name);
 }
+function getProvider(role = "primary", requireKey = true) {
+  const selected = envValue("AI_PROVIDER") || (envValue("DEEPSEEK_API_KEY") ? "deepseek" : "glm");
+  if (!["deepseek", "glm"].includes(selected)) throw new Error("AI_PROVIDER must be deepseek or glm");
+  const deepseek = selected === "deepseek";
+  const prefix = deepseek ? "DEEPSEEK" : "GLM";
+  const apiKey = envValue(`${prefix}_API_KEY`);
+  if (requireKey && !apiKey) throw new Error(`${prefix}_API_KEY is not configured`);
+  const model = envValue(`${prefix}_${role === "tool" ? "TOOL_MODEL" : "MODEL"}`) || envValue(`${prefix}_MODEL`) || (deepseek ? "deepseek-flash" : role === "tool" ? "glm-5-turbo" : "glm-5.1");
+  return {
+    id: selected,
+    provider: deepseek ? "DeepSeek" : "Z.ai",
+    toolName: deepseek ? "DeepSeek" : "GLM",
+    apiKey,
+    model,
+    baseUrl: (envValue(`${prefix}_BASE_URL`) || (deepseek ? "https://api.deepseek.com" : "https://api.z.ai/api/coding/paas/v4")).replace(/\/$/, "")
+  };
+}
+
+// netlify/functions-src/replay-run.mts
 function extractJson(text) {
   try {
     return JSON.parse(text.trim());
   } catch {
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error("GLM response did not include JSON");
+    if (!match) throw new Error("Model response did not include JSON");
     return JSON.parse(match[0]);
   }
 }
@@ -18,7 +37,7 @@ function parseProviderResponse(text) {
     return { rawText: text };
   }
 }
-const sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
+var sensitiveKeyPattern = /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token)$/i;
 function sanitizeForLog(value, depth = 0) {
   if (depth > 12) return "[MaxDepth]";
   if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item, depth + 1));
@@ -49,10 +68,7 @@ data: ${JSON.stringify(data)}
 
 `));
       try {
-        const apiKey = envValue("GLM_API_KEY");
-        if (!apiKey) throw new Error("GLM_API_KEY is not configured");
-        const model = envValue("GLM_MODEL") || "glm-5.1";
-        const baseUrl = envValue("GLM_BASE_URL") || "https://api.z.ai/api/coding/paas/v4";
+        const { apiKey, provider, toolName, model, baseUrl } = getProvider();
         const endpointUrl = `${baseUrl}/chat/completions`;
         const requestBody = {
           model,
@@ -62,7 +78,7 @@ data: ${JSON.stringify(data)}
           stream: false,
           response_format: { type: "json_object" },
           messages: [
-            { role: "system", content: "Return only valid JSON for a LangGraph time-travel fork." },
+            { role: "system", content: "Return only valid JSON for alternate-branch analysis of a saved investigation snapshot. This is model analysis, not re-execution of a graph." },
             {
               role: "user",
               content: JSON.stringify({
@@ -97,14 +113,14 @@ data: ${JSON.stringify(data)}
             id: crypto.randomUUID(),
             timestamp: (/* @__PURE__ */ new Date()).toISOString(),
             callerAgent: "Time Travel Debugger",
-            toolName: "GLM-5.1",
-            provider: "z.ai",
+            toolName,
+            provider,
             model,
             baseUrl,
             method: "POST",
             endpointUrl,
             requestPayload: sanitizeForLog({
-              provider: "z.ai",
+              provider,
               model,
               baseUrl,
               endpointPath: "/chat/completions",
@@ -115,7 +131,7 @@ data: ${JSON.stringify(data)}
             rawResponsePayload: sanitizeForLog(rawResponse),
             parsedResponsePayload: sanitizeForLog(parsedOutput),
             responsePayload: sanitizeForLog({
-              provider: "z.ai",
+              provider,
               model,
               statusCode,
               statusText,
@@ -144,10 +160,11 @@ data: ${JSON.stringify(data)}
               "content-type": "application/json",
               "accept-language": "en-US,en"
             },
+            signal: AbortSignal.timeout(4e4),
             body: JSON.stringify(requestBody)
           });
         } catch (error) {
-          const message = error instanceof Error ? error.message : "GLM request failed before response";
+          const message = error instanceof Error ? error.message : "Model request failed before response";
           emitLlmAudit({
             rawResponse: null,
             latencyMs: Date.now() - started,
@@ -167,16 +184,16 @@ data: ${JSON.stringify(data)}
             statusCode: response.status,
             statusText: response.statusText,
             ok: false,
-            errorMessage: `GLM ${response.status}: ${text.slice(0, 240)}`
+            errorMessage: `${provider} ${response.status}: ${text.slice(0, 240)}`
           });
-          throw new Error(`GLM ${response.status}: ${text.slice(0, 240)}`);
+          throw new Error(`${provider} ${response.status}: ${text.slice(0, 240)}`);
         }
         const content = parsed?.choices?.[0]?.message?.content ?? "{}";
         let fork;
         try {
           fork = extractJson(content);
         } catch (error) {
-          const message = error instanceof Error ? error.message : "GLM response parse failed";
+          const message = error instanceof Error ? error.message : "Model response parse failed";
           emitLlmAudit({
             rawResponse: parsed,
             rawContent: content,
@@ -231,7 +248,7 @@ data: ${JSON.stringify(data)}
     }
   });
 };
-const config = {
+var config = {
   path: "/api/replay-run"
 };
 export {

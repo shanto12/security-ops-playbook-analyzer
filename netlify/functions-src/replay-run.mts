@@ -1,16 +1,14 @@
+import { getProvider } from '../lib/provider'
 import type { Config } from '@netlify/functions'
 
-function envValue(name: string): string | undefined {
-  const netlify = (globalThis as any).Netlify
-  return netlify?.env?.get?.(name) ?? process.env[name]
-}
+
 
 function extractJson(text: string): any {
   try {
     return JSON.parse(text.trim())
   } catch {
     const match = text.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('GLM response did not include JSON')
+    if (!match) throw new Error('Model response did not include JSON')
     return JSON.parse(match[0])
   }
 }
@@ -55,10 +53,7 @@ export default async (req: Request) => {
     async start(controller) {
       const send = (event: string, data: unknown) => controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
       try {
-        const apiKey = envValue('GLM_API_KEY')
-        if (!apiKey) throw new Error('GLM_API_KEY is not configured')
-        const model = envValue('GLM_MODEL') || 'glm-5.1'
-        const baseUrl = envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
+        const { apiKey, provider, toolName, model, baseUrl } = getProvider()
         const endpointUrl = `${baseUrl}/chat/completions`
         const requestBody = {
           model,
@@ -68,7 +63,7 @@ export default async (req: Request) => {
           stream: false,
           response_format: { type: 'json_object' },
           messages: [
-            { role: 'system', content: 'Return only valid JSON for a LangGraph time-travel fork.' },
+            { role: 'system', content: 'Return only valid JSON for alternate-branch analysis of a saved investigation snapshot. This is model analysis, not re-execution of a graph.' },
             {
               role: 'user',
               content: JSON.stringify({
@@ -114,14 +109,14 @@ export default async (req: Request) => {
             id: crypto.randomUUID(),
             timestamp: new Date().toISOString(),
             callerAgent: 'Time Travel Debugger',
-            toolName: 'GLM-5.1',
-            provider: 'z.ai',
+            toolName,
+            provider,
             model,
             baseUrl,
             method: 'POST',
             endpointUrl,
           requestPayload: sanitizeForLog({
-            provider: 'z.ai',
+            provider,
             model,
             baseUrl,
               endpointPath: '/chat/completions',
@@ -132,7 +127,7 @@ export default async (req: Request) => {
           rawResponsePayload: sanitizeForLog(rawResponse),
           parsedResponsePayload: sanitizeForLog(parsedOutput),
           responsePayload: sanitizeForLog({
-            provider: 'z.ai',
+            provider,
               model,
               statusCode,
               statusText,
@@ -163,10 +158,11 @@ export default async (req: Request) => {
               'content-type': 'application/json',
               'accept-language': 'en-US,en',
             },
-            body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(40_000),
+      body: JSON.stringify(requestBody),
           })
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'GLM request failed before response'
+          const message = error instanceof Error ? error.message : 'Model request failed before response'
           emitLlmAudit({
             rawResponse: null,
             latencyMs: Date.now() - started,
@@ -186,16 +182,16 @@ export default async (req: Request) => {
             statusCode: response.status,
             statusText: response.statusText,
             ok: false,
-            errorMessage: `GLM ${response.status}: ${text.slice(0, 240)}`,
+            errorMessage: `${provider} ${response.status}: ${text.slice(0, 240)}`,
           })
-          throw new Error(`GLM ${response.status}: ${text.slice(0, 240)}`)
+          throw new Error(`${provider} ${response.status}: ${text.slice(0, 240)}`)
         }
         const content = parsed?.choices?.[0]?.message?.content ?? '{}'
         let fork: any
         try {
           fork = extractJson(content)
         } catch (error) {
-          const message = error instanceof Error ? error.message : 'GLM response parse failed'
+          const message = error instanceof Error ? error.message : 'Model response parse failed'
           emitLlmAudit({
             rawResponse: parsed,
             rawContent: content,

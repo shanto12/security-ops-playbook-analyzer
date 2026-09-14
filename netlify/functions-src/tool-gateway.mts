@@ -1,3 +1,4 @@
+import { getProvider } from '../lib/provider'
 import type { Config } from '@netlify/functions'
 
 type ToolSpec = {
@@ -126,10 +127,7 @@ const toolAliases: Record<string, string> = {
   cloudtrail: '/api/cloudtrail/search',
 }
 
-function envValue(name: string): string | undefined {
-  const netlify = (globalThis as any).Netlify
-  return netlify?.env?.get?.(name) ?? process.env[name]
-}
+
 
 function jsonResponse(status: number, body: unknown) {
   return Response.json(body, {
@@ -144,7 +142,7 @@ function extractJson(text: string): any {
     return JSON.parse(direct)
   } catch {
     const match = direct.match(/\{[\s\S]*\}/)
-    if (!match) throw new Error('GLM response did not include JSON')
+    if (!match) throw new Error('Model response did not include JSON')
     return JSON.parse(match[0])
   }
 }
@@ -175,18 +173,15 @@ function sanitizeForLog(value: unknown, depth = 0): unknown {
   )
 }
 
-async function callGlm(spec: ToolSpec, payload: any) {
-  const apiKey = envValue('GLM_API_KEY')
-  if (!apiKey) throw new Error('GLM_API_KEY is not configured')
-  const model = envValue('GLM_TOOL_MODEL') || 'glm-5-turbo'
-  const baseUrl = envValue('GLM_BASE_URL') || 'https://api.z.ai/api/coding/paas/v4'
+async function callModel(spec: ToolSpec, payload: any) {
+  const { apiKey, provider, toolName, model, baseUrl } = getProvider('tool')
   const endpointUrl = `${baseUrl}/chat/completions`
   const incidentId = payload?.incident?.incidentId ?? payload?.incidentId ?? 'unknown'
   const requestBody = {
     model,
     thinking: { type: 'disabled' },
     temperature: 0.88,
-    max_tokens: 260,
+    max_tokens: 600,
     stream: false,
     response_format: { type: 'json_object' },
     messages: [
@@ -196,7 +191,7 @@ async function callGlm(spec: ToolSpec, payload: any) {
           `You are ${spec.name}, an enterprise security/corporate tool API. ` +
           'Return compact valid JSON. Do not use markdown. Do not wrap the answer in an "answer" field. ' +
           'Use concrete top-level keys from the requested schema hint. Produce a realistic but synthetic response. ' +
-          'Vary every response using the incident ID, timestamp, and provided indicators. Never say you are an AI.',
+          'Vary every response using the incident ID, timestamp, and provided indicators. These are simulated tool records for a public demo, never real vendor results.',
       },
       {
         role: 'user',
@@ -227,12 +222,13 @@ async function callGlm(spec: ToolSpec, payload: any) {
         'content-type': 'application/json',
         'accept-language': 'en-US,en',
       },
+      signal: AbortSignal.timeout(40_000),
       body: JSON.stringify(requestBody),
     })
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'GLM request failed before response'
+    const message = error instanceof Error ? error.message : 'Model request failed before response'
     const requestPayload = sanitizeForLog({
-      provider: 'z.ai',
+      provider,
       model,
       baseUrl,
       endpointPath: '/chat/completions',
@@ -244,15 +240,15 @@ async function callGlm(spec: ToolSpec, payload: any) {
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       callerAgent: `${spec.name} Tool Simulator`,
-      toolName: 'GLM-5.1',
-      provider: 'z.ai',
+      toolName,
+      provider,
       model,
       baseUrl,
       method: 'POST',
       endpointUrl,
       requestPayload,
       responsePayload: sanitizeForLog({
-        provider: 'z.ai',
+        provider,
         model,
         raw: null,
         error: message,
@@ -273,14 +269,14 @@ async function callGlm(spec: ToolSpec, payload: any) {
     id: crypto.randomUUID(),
     timestamp: new Date().toISOString(),
     callerAgent: `${spec.name} Tool Simulator`,
-    toolName: 'GLM-5.1',
-    provider: 'z.ai',
+    toolName,
+    provider,
     model: data?.model ?? model,
     baseUrl,
     method: 'POST',
     endpointUrl,
     requestPayload: sanitizeForLog({
-      provider: 'z.ai',
+      provider,
       model,
       baseUrl,
       endpointPath: '/chat/completions',
@@ -291,7 +287,7 @@ async function callGlm(spec: ToolSpec, payload: any) {
     rawResponsePayload: sanitizeForLog(data),
     parsedResponsePayload: sanitizeForLog(result),
     responsePayload: sanitizeForLog({
-      provider: 'z.ai',
+      provider,
       model: data?.model ?? model,
       statusCode: response.status,
       statusText: response.statusText,
@@ -311,7 +307,7 @@ async function callGlm(spec: ToolSpec, payload: any) {
     type: response.ok ? 'llm' : 'error',
   })
   if (!response.ok) {
-    const error = new Error(`GLM ${response.status}: ${text.slice(0, 220)}`)
+    const error = new Error(`${provider} ${response.status}: ${text.slice(0, 220)}`)
     ;(error as Error & { llmAudit?: unknown }).llmAudit = makeAudit(undefined, error.message)
     throw error
   }
@@ -320,7 +316,7 @@ async function callGlm(spec: ToolSpec, payload: any) {
   try {
     result = extractJson(content)
   } catch (error) {
-    const parseError = error instanceof Error ? error : new Error('GLM response parse failed')
+    const parseError = error instanceof Error ? error : new Error('Model response parse failed')
     ;(parseError as Error & { llmAudit?: unknown }).llmAudit = makeAudit(undefined, parseError.message, content)
     throw parseError
   }
@@ -349,9 +345,11 @@ export default async (req: Request) => {
   }
 
   try {
-    const generated = await callGlm(spec, payload)
+    const generated = await callModel(spec, payload)
     return jsonResponse(200, {
       tool: spec.name,
+      synthetic: true,
+      provider: getProvider('tool').provider,
       endpoint: spec.path,
       generatedAt: new Date().toISOString(),
       incidentId: payload?.incident?.incidentId ?? payload?.incidentId,

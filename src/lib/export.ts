@@ -44,14 +44,14 @@ export function downloadReportPdf(incident: Incident | undefined, report: FinalR
         </style>
       </head>
       <body>
-        <button onclick="window.print()">Print or Save as PDF</button>
+        <button id="print-report">Print or Save as PDF</button>
         <header>
-          <h1>SOC AI Agent Incident Report</h1>
+          <h1>Sentinel · Synthetic Investigation Report</h1>
           <div class="meta">
             <span><strong>Incident:</strong> ${escapeHtml(incident.incidentId)}</span>
             <span><strong>Severity:</strong> ${escapeHtml(incident.severity)}</span>
             <span><strong>Type:</strong> ${escapeHtml(incident.incidentType)}</span>
-            <span><strong>Timestamp:</strong> ${escapeHtml(incident.timestamp)}</span>
+            <span><strong>Timestamp:</strong> ${escapeHtml(new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'America/Chicago' }).format(new Date(incident.timestamp)))} Central</span>
             <span><strong>User:</strong> ${escapeHtml(incident.affectedUser)}</span>
             <span><strong>Host:</strong> ${escapeHtml(incident.affectedHost)}</span>
           </div>
@@ -65,11 +65,12 @@ export function downloadReportPdf(incident: Incident | undefined, report: FinalR
         ${section('Recommendations', report.recommendations)}
         ${section('Analyst Decisions', report.analystDecisions)}
         ${section('Tool Result Summary', report.toolResultSummary)}
-        <script>window.addEventListener('load', () => window.print())</script>
+
       </body>
     </html>
   `)
   reportWindow.document.close()
+  reportWindow.document.getElementById('print-report')?.addEventListener('click', () => reportWindow.print())
 }
 
 export function buildRunExport(state: RunState) {
